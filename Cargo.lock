@@ -780,8 +780,7 @@ dependencies = [
 [[package]]
 name = "distributed-topic-tracker"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "798c6f5b2163a27ca069346c08a94a4b96fff14a52e33c434dcba33597eb4106"
+source = "git+https://github.com/rustonbsd/distributed-topic-tracker?rev=79ce49947c4852a4c31e5403e381db3824bdc1bf#79ce49947c4852a4c31e5403e381db3824bdc1bf"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4351,9 +4350,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tun-rs"
-version = "2.6.2"
+version = "2.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2887278c742dc2ad9482bd0f3fa29f6aac9ab39bdf3fa828f7407cc42ec9c8d"
+checksum = "49f0699ba6cb89fd48f243b325d5943ec8ecf46fec969ceee2228b1e2f34a74a"
 dependencies = [
  "blocking",
  "byteorder",
