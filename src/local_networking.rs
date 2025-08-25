@@ -27,6 +27,12 @@ impl From<Ipv4Pkg> for Ipv4Packet<'static> {
     }
 }
 
+impl Ipv4Pkg {
+    pub fn to_ipv4(&self) -> Ipv4Packet<'static> {
+        self.clone().into()
+    }
+}
+
 pub struct Tun {
     node_id: NodeId,
     ip: Ipv4Addr,

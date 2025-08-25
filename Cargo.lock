@@ -780,7 +780,7 @@ dependencies = [
 [[package]]
 name = "distributed-topic-tracker"
 version = "0.1.1"
-source = "git+https://github.com/rustonbsd/distributed-topic-tracker?rev=79ce49947c4852a4c31e5403e381db3824bdc1bf#79ce49947c4852a4c31e5403e381db3824bdc1bf"
+source = "git+https://github.com/rustonbsd/distributed-topic-tracker?rev=f9040f29d8d4bdc4b35fe3eb3ae770d3c499d32f#f9040f29d8d4bdc4b35fe3eb3ae770d3c499d32f"
 dependencies = [
  "anyhow",
  "arc-swap",

@@ -1,24 +1,28 @@
-use std::{collections::HashMap, net::Ipv4Addr, time::{Duration, SystemTime}};
+use std::{
+    collections::HashMap,
+    net::Ipv4Addr,
+    time::{Duration, SystemTime},
+};
 
-use distributed_topic_tracker::{AutoDiscoveryGossip, GossipReceiver, GossipSender, Topic, TopicId};
+use distributed_topic_tracker::{
+    AutoDiscoveryGossip, GossipReceiver, GossipSender, Topic, TopicId,
+};
 use iroh::NodeId;
 use serde::{Deserialize, Serialize};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use distributed_topic_tracker::{AutoDiscoveryBuilder, DefaultSecretRotation};
 use iroh::{Endpoint, SecretKey};
-use iroh_gossip::{
-    net::Gossip,
-    proto::HyparviewConfig,
-};
+use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
 use tokio::time::sleep;
+
+use crate::local_networking::Ipv4Pkg;
 
 #[derive(Debug)]
 pub struct Router {
     pub gossip_sender: GossipSender,
     pub gossip_receiver: GossipReceiver,
-    router_requester: tokio::sync::broadcast::Sender<RouterRequest>,
-    keep_alive_router_requester: tokio::sync::broadcast::Receiver<RouterRequest>,
+    router_requester: tokio::sync::mpsc::Sender<RouterRequest>,
     pub node_id: NodeId,
     _topic: Option<Topic<DefaultSecretRotation>>,
 }
@@ -29,7 +33,6 @@ impl Clone for Router {
             gossip_sender: self.gossip_sender.clone(),
             gossip_receiver: self.gossip_receiver.clone(),
             router_requester: self.router_requester.clone(),
-            keep_alive_router_requester: self.router_requester.subscribe(),
             node_id: self.node_id.clone(),
             _topic: None,
         }
@@ -57,10 +60,7 @@ enum RouterMessage {
 #[derive(Debug)]
 enum RouterRequest {
     GetRouterState(tokio::sync::oneshot::Sender<RouterState>),
-    SetNodeIdIpDict(
-        HashMap<NodeId, Ipv4Addr>,
-        tokio::sync::oneshot::Sender<()>,
-    ),
+    SetNodeIdIpDict(HashMap<NodeId, Ipv4Addr>, tokio::sync::oneshot::Sender<()>),
     SetLeader(NodeId, tokio::sync::oneshot::Sender<()>),
     SetLastLeaderMsg(StateMessage, tokio::sync::oneshot::Sender<()>),
 }
@@ -146,8 +146,7 @@ impl Builder {
 
         println!("5");
 
-        let (router_state_sender,  router_state_reader) = tokio::sync::mpsc::channel(1024);
-
+        let (router_state_sender, router_state_reader) = tokio::sync::mpsc::channel(1024);
 
         let router_state_hs = if self.creator_mode {
             let mut hs = HashMap::<NodeId, Ipv4Addr>::new();
@@ -178,11 +177,9 @@ impl Builder {
             gossip_sender,
             gossip_receiver,
             router_requester: router_state_sender,
-            keep_alive_router_requester: keep_alive_router_state_sender,
             node_id: endpoint.node_id(),
             _topic: Some(topic),
         };
-
 
         tokio::spawn({
             let router = router.clone();
@@ -190,7 +187,6 @@ impl Builder {
                 let _ = router.spawn().await;
             }
         });
-
 
         println!("8");
         if !self.creator_mode {
@@ -241,7 +237,8 @@ impl Router {
                                     .set_node_id_ip_dict(state_message.node_id_ip_dict)
                                     .await;
                                 if state.leader.is_none()
-                                    || (state_message.leader.is_some() && state.leader.unwrap() != state_message.leader.unwrap())
+                                    || (state_message.leader.is_some()
+                                        && state.leader.unwrap() != state_message.leader.unwrap())
                                 {
                                     let _ = self.set_leader(state_message.leader.unwrap()).await;
                                 }
@@ -259,7 +256,18 @@ impl Router {
                                                 .is_ok()
                                             {
                                                 if let Ok(state) = self.get_state().await {
-                                                    let msg = RouterMessage::StateMessage(StateMessage { node_id_ip_dict: state.node_id_ip_dict, timestamp: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs() as i64, leader: state.leader });
+                                                    let msg =
+                                                        RouterMessage::StateMessage(StateMessage {
+                                                            node_id_ip_dict: state.node_id_ip_dict,
+                                                            timestamp: SystemTime::now()
+                                                                .duration_since(
+                                                                    SystemTime::UNIX_EPOCH,
+                                                                )
+                                                                .unwrap_or(Duration::from_secs(0))
+                                                                .as_secs()
+                                                                as i64,
+                                                            leader: state.leader,
+                                                        });
                                                     let data = serde_json::to_vec(&msg)
                                                         .expect("serialization failed");
                                                     let _ =
@@ -279,7 +287,6 @@ impl Router {
                 } else {
                     println!("Failed to deserialize gossip message");
                 }
-
             }
         }
 
@@ -305,7 +312,7 @@ impl Router {
             if highest_ip.octets()[3] == 255 {
                 0
             } else {
-                highest_ip.octets()[3]+1
+                highest_ip.octets()[3] + 1
             },
         );
 
@@ -333,41 +340,60 @@ impl Router {
     }
 
     async fn set_last_leader_msg(&self, latest_leader_msg: StateMessage) -> Result<()> {
-        let (tx, mut rx) = tokio::sync::broadcast::channel(1);
-        self.router_requester.send(RouterRequest::SetLastLeaderMsg(
-            latest_leader_msg,
-            tx.clone(),
-        ))?;
-        rx.recv().await?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.router_requester
+            .send(RouterRequest::SetLastLeaderMsg(latest_leader_msg, tx))
+            .await?;
+        rx.await?;
         Ok(())
     }
 
     async fn set_leader(&self, leader: NodeId) -> Result<()> {
-        let (tx, mut rx) = tokio::sync::broadcast::channel(1);
+        let (tx, rx) = tokio::sync::oneshot::channel();
         self.router_requester
-            .send(RouterRequest::SetLeader(leader, tx.clone()))?;
-        rx.recv().await?;
+            .send(RouterRequest::SetLeader(leader, tx))
+            .await?;
+        rx.await?;
         Ok(())
     }
 
     async fn set_node_id_ip_dict(&self, node_id_ip_dict: HashMap<NodeId, Ipv4Addr>) -> Result<()> {
-        let (tx, mut rx) = tokio::sync::broadcast::channel(1);
+        let (tx, rx) = tokio::sync::oneshot::channel();
         self.router_requester
-            .send(RouterRequest::SetNodeIdIpDict(node_id_ip_dict, tx.clone()))?;
-        rx.recv().await?;
+            .send(RouterRequest::SetNodeIdIpDict(node_id_ip_dict, tx))
+            .await?;
+        rx.await?;
         Ok(())
     }
 
     pub async fn get_state(&self) -> Result<RouterState> {
-        let (tx, mut rx) = tokio::sync::broadcast::channel(1);
+        let (tx, rx) = tokio::sync::oneshot::channel();
         self.router_requester
-            .send(RouterRequest::GetRouterState(tx.clone()))?;
-        Ok(rx.recv().await?)
+            .send(RouterRequest::GetRouterState(tx))
+            .await?;
+        Ok(rx.await?)
+    }
+
+    pub async fn package_route(&self, pkg: Ipv4Pkg) -> Result<()> {
+        let pkg = pkg.to_ipv4();
+        let dest = pkg.get_destination();
+
+        let state = self.get_state().await?;
+        let (dest_node_id, dest_ip) = state
+            .node_id_ip_dict
+            .iter()
+            .filter(|(_, ip)| ip.octets() == dest.octets())
+            .next()
+            .context("")?;
+
+        todo!("connect to protocol that links peers directly (no gossip)");
+
+        Ok(())
     }
 }
 
 impl RouterState {
-    async fn spawn(&mut self,reader: tokio::sync::mpsc::Receiver<RouterRequest>) {
+    async fn spawn(&mut self, reader: tokio::sync::mpsc::Receiver<RouterRequest>) {
         let mut reader = reader;
         loop {
             tokio::select! {

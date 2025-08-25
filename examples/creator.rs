@@ -5,6 +5,11 @@ use tokio::{signal::ctrl_c, time::sleep};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if !self_runas::is_elevated() {
+        self_runas::admin()?;
+        return Ok(())
+    }
+    
     let secret = SecretKey::generate(&mut rand::thread_rng());
 
     let mut router = iroh_lan::Router::builder()

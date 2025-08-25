@@ -1,4 +1,4 @@
-mod protocol;
+mod direct_connect;
 mod local_networking;
 mod router;
 
