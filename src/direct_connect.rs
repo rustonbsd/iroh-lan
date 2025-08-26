@@ -121,8 +121,8 @@ impl Direct {
 
     pub async fn route_packet(&self, to: NodeId, pkg: DirectMessage) -> Result<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if self.api.send(Api::RoutePacket(to, pkg, tx)).await.is_err() {
-            return Err(anyhow::anyhow!("Direct actor task has shut down"));
+        if let Err(err) = self.api.send(Api::RoutePacket(to, pkg, tx)).await {
+            return Err(anyhow::anyhow!("Error routing packet: {err}"));
         }
         rx.await?
     }

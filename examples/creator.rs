@@ -33,8 +33,11 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             Ok(tun_recv) = remote_reader.recv() => {
                 if let Ok(remote_node_id)  = router.ip_to_node_id(tun_recv.clone()).await {
-                    if router.direct.route_packet(remote_node_id, DirectMessage::IpPacket(tun_recv)).await.is_err() {
+                    if let Err(err) = router.direct.route_packet(remote_node_id, DirectMessage::IpPacket(tun_recv)).await {
                         println!("[ERROR] failed to route packet to {:?}", remote_node_id);
+                        println!("Reason: {:?}", err);
+                    } else {
+                        println!("Routed packet to {:?}", remote_node_id);
                     }
                 }
             }
