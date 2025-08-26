@@ -1,7 +1,5 @@
 use std::{
-    collections::HashMap,
-    net::Ipv4Addr,
-    time::{Duration, SystemTime},
+    collections::HashMap, net::Ipv4Addr, sync::Arc, time::{Duration, SystemTime}
 };
 
 use distributed_topic_tracker::{
@@ -16,7 +14,7 @@ use iroh::{Endpoint, SecretKey};
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
 use tokio::time::sleep;
 
-use crate::local_networking::Ipv4Pkg;
+use crate::{local_networking::Ipv4Pkg, Direct};
 
 #[derive(Debug)]
 pub struct Router {
@@ -25,6 +23,9 @@ pub struct Router {
     router_requester: tokio::sync::mpsc::Sender<RouterRequest>,
     pub node_id: NodeId,
     _topic: Option<Topic<DefaultSecretRotation>>,
+    pub direct: Arc<Direct>,
+    pub direct_connect_sender: tokio::sync::broadcast::Sender<crate::direct_connect::DirectMessage>,
+    pub _keep_alive_direct_connect_reader: tokio::sync::broadcast::Receiver<crate::direct_connect::DirectMessage>,
 }
 
 impl Clone for Router {
@@ -35,6 +36,9 @@ impl Clone for Router {
             router_requester: self.router_requester.clone(),
             node_id: self.node_id.clone(),
             _topic: None,
+            direct: Arc::clone(&self.direct),
+            direct_connect_sender: self.direct_connect_sender.clone(),
+            _keep_alive_direct_connect_reader: self.direct_connect_sender.subscribe(),
         }
     }
 }
@@ -67,9 +71,9 @@ enum RouterRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouterState {
-    node_id_ip_dict: HashMap<NodeId, Ipv4Addr>,
-    leader: Option<NodeId>,
-    last_leader_msg: Option<StateMessage>,
+    pub node_id_ip_dict: HashMap<NodeId, Ipv4Addr>,
+    pub leader: Option<NodeId>,
+    pub last_leader_msg: Option<StateMessage>,
 }
 
 #[derive(Debug, Clone)]
@@ -173,12 +177,18 @@ impl Builder {
             }
         });
 
+        let (direct_connect_tx, direct_connect_rx) = tokio::sync::broadcast::channel(1024);
+        let direct = Direct::new(endpoint.clone(), direct_connect_tx.clone());
+
         let router = Router {
             gossip_sender,
             gossip_receiver,
             router_requester: router_state_sender,
             node_id: endpoint.node_id(),
             _topic: Some(topic),
+            direct: Arc::new(direct),
+            _keep_alive_direct_connect_reader: direct_connect_tx.subscribe(),
+            direct_connect_sender: direct_connect_tx,
         };
 
         tokio::spawn({
@@ -374,21 +384,37 @@ impl Router {
         Ok(rx.await?)
     }
 
-    pub async fn package_route(&self, pkg: Ipv4Pkg) -> Result<()> {
-        let pkg = pkg.to_ipv4();
+    // Returns the NodeId of the destination ipv4
+    pub async fn ip_to_node_id(&self, pkg: Ipv4Pkg) -> Result<NodeId> {
+        let pkg = pkg.to_ipv4_packet();
         let dest = pkg.get_destination();
 
         let state = self.get_state().await?;
-        let (dest_node_id, dest_ip) = state
+        let (dest_node_id, _) = state
             .node_id_ip_dict
             .iter()
             .filter(|(_, ip)| ip.octets() == dest.octets())
             .next()
             .context("")?;
 
-        todo!("connect to protocol that links peers directly (no gossip)");
+        Ok(*dest_node_id)
+    }
 
-        Ok(())
+    pub async fn node_id_to_ip(&self, node_id: NodeId) -> Result<Ipv4Addr> {
+        let state = self.get_state().await?;
+        let ip = state
+            .node_id_ip_dict
+            .get(&node_id)
+            .context("node id not found")?;
+        Ok(*ip)
+    }
+
+    pub fn subscribe_direct_connect(&self) -> tokio::sync::broadcast::Receiver<crate::direct_connect::DirectMessage> {
+        self.direct_connect_sender.subscribe()
+    }
+
+    pub fn node_id(&self) -> NodeId {
+        self.node_id
     }
 }
 

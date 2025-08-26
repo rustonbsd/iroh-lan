@@ -779,8 +779,9 @@ dependencies = [
 
 [[package]]
 name = "distributed-topic-tracker"
-version = "0.1.1"
-source = "git+https://github.com/rustonbsd/distributed-topic-tracker?rev=f9040f29d8d4bdc4b35fe3eb3ae770d3c499d32f#f9040f29d8d4bdc4b35fe3eb3ae770d3c499d32f"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d938815f79431851b5f845eb4ae8868d9926472e42d6ed7fc322034dda349467"
 dependencies = [
  "anyhow",
  "arc-swap",

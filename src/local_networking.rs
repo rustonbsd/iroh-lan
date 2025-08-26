@@ -2,15 +2,15 @@ use anyhow::{Result, bail};
 use iroh::NodeId;
 use pnet_packet::{
     Packet,
-    ethernet::{EtherTypes, EthernetPacket},
     ipv4::Ipv4Packet,
 };
-use std::{io::Read, net::Ipv4Addr};
+use serde::{Deserialize, Serialize};
+use std::net::Ipv4Addr;
 use tun_rs::{AsyncDevice, DeviceBuilder, Layer};
 
 use pnet_packet::ip::IpNextHeaderProtocols;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash,Serialize,Deserialize)]
 pub struct Ipv4Pkg(Vec<u8>);
 
 impl From<Ipv4Packet<'static>> for Ipv4Pkg {
@@ -28,7 +28,7 @@ impl From<Ipv4Pkg> for Ipv4Packet<'static> {
 }
 
 impl Ipv4Pkg {
-    pub fn to_ipv4(&self) -> Ipv4Packet<'static> {
+    pub fn to_ipv4_packet(&self) -> Ipv4Packet<'static> {
         self.clone().into()
     }
 }
@@ -39,11 +39,25 @@ pub struct Tun {
     inner: TunInner,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct TunInner {
     ip: Ipv4Addr,
     tun_writer: tokio::sync::broadcast::Sender<Ipv4Pkg>,
     remote_writer: tokio::sync::broadcast::Sender<Ipv4Pkg>,
+    _keepalive_tun_reader: tokio::sync::broadcast::Receiver<Ipv4Pkg>,
+    _keepalive_remote_reader: tokio::sync::broadcast::Receiver<Ipv4Pkg>,
+}
+
+impl Clone for TunInner {
+    fn clone(&self) -> Self {
+        Self {
+            ip: self.ip,
+            tun_writer: self.tun_writer.clone(),
+            remote_writer: self.remote_writer.clone(),
+            _keepalive_tun_reader: self.tun_writer.subscribe(),
+            _keepalive_remote_reader: self.remote_writer.subscribe(),
+        }
+    }
 }
 
 impl Tun {
@@ -61,24 +75,32 @@ impl Tun {
 
         Ok(Self { node_id, ip, inner })
     }
+
+    pub async fn write(&self, pkg: Ipv4Pkg) -> Result<()> {
+        self.inner.write_tun(pkg).await
+    }
 }
 
 impl TunInner {
     pub fn new(ip: Ipv4Addr, remote_writer: tokio::sync::broadcast::Sender<Ipv4Pkg>) -> Self {
-        let (tun_tx, mut tun_rx) = tokio::sync::broadcast::channel(1024);
+        let (tun_writer, mut tun_reader) = tokio::sync::broadcast::channel(1024);
+        let _keepalive_tun_writer = tun_writer.subscribe();
+        let _keepalive_remote_reader = remote_writer.subscribe();
 
         // keep sender alive by having a single receiver at all times
         tokio::spawn({
             async move {
-                while tun_rx.recv().await.is_ok() {}
+                while tun_reader.recv().await.is_ok() {}
                 println!("debug: TunInner channel rx dropped");
             }
         });
 
         Self {
-            tun_writer: tun_tx,
+            tun_writer,
             remote_writer,
             ip,
+            _keepalive_tun_reader: _keepalive_tun_writer,
+            _keepalive_remote_reader,
         }
     }
 

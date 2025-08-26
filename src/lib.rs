@@ -3,4 +3,5 @@ mod local_networking;
 mod router;
 
 pub use local_networking::Tun;
+pub use direct_connect::{Direct, DirectMessage};
 pub use router::Router;
