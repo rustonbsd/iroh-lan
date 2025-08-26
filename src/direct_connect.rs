@@ -260,7 +260,12 @@ impl Actor {
                 }
             }
         } else {
-            return Err(anyhow::anyhow!("No such peer"));
+            // insert as pending and try to connect
+            self.peers.insert(to, PeerState::Pending { node_id: to, queue: vec![pkg] });
+            let (tx,rx) = tokio::sync::oneshot::channel();
+            if self._api_tx.send(Api::Reconnect(to, tx)).await.is_err() || rx.await.is_err() {
+                return Err(anyhow::anyhow!("Failed to reconnect to peer"));
+            }
         }
         Ok(())
     }
