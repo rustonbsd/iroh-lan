@@ -149,6 +149,7 @@ impl Actor {
         };
 
         // Spawn a task for this connection
+        let direct_tx = self.direct_connect_tx.clone();
         self.connection_tasks.spawn(
             async move {
                 
@@ -169,7 +170,15 @@ impl Actor {
                             let frame_len = u32::from_be_bytes(frame_len_buf);
                             let mut frame_buf = vec![0u8; frame_len as usize];
                             if let Ok(Some(_)) = conn.1.read(&mut frame_buf).await {
-                                let _ = self.handle_frame(remote_node_id, frame_buf).await;
+                                // handle frame locally without borrowing `self`
+                                if let Ok(pkg) = serde_json::from_slice::<DirectMessage>(&frame_buf) {
+                                    match pkg {
+                                        DirectMessage::IpPacket(ip_pkg) => {
+                                            println!("Received packet from {}: dest: {} source: {}", remote_node_id, ip_pkg.to_ipv4_packet().get_destination(), ip_pkg.to_ipv4_packet().get_source());
+                                            let _ = direct_tx.send(DirectMessage::IpPacket(ip_pkg));
+                                        }
+                                    }
+                                }
                             } else {
                                 break;
                             }
@@ -179,18 +188,6 @@ impl Actor {
                 (remote_node_id, conn, Ok(()))
             }
         );
-        Ok(())
-    }
-
-    async fn handle_frame(&self, from: NodeId, frame_buf: Vec<u8>) -> Result<()> {
-        let pkg = serde_json::from_slice::<DirectMessage>(&frame_buf)?;
-        match pkg {
-            DirectMessage::IpPacket(ip_pkg) => {
-                println!("Received packet from {}: dest: {} source: {}", from, ip_pkg.to_ipv4_packet().get_destination(), ip_pkg.to_ipv4_packet().get_source());
-                let _ = self.direct_connect_tx.send(DirectMessage::IpPacket(ip_pkg));
-            }
-        }
-
         Ok(())
     }
 
