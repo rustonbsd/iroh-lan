@@ -33,6 +33,8 @@ async fn main() -> anyhow::Result<()> {
             Ok(tun_recv) = remote_reader.recv() => {
                 if let Ok(remote_node_id)  = router.ip_to_node_id(tun_recv.clone()).await {
                     
+                    
+
                     if let Err(err) = router.direct.route_packet(remote_node_id, DirectMessage::IpPacket(tun_recv)).await {
                         println!("[ERROR] failed to route packet to {:?}", remote_node_id);
                         println!("Reason: {:?}", err);

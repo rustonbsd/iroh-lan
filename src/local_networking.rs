@@ -162,12 +162,12 @@ impl TunInner {
                             let _ = inner.write_remote(pkg).await;
                         }
 
-                        println!(
+                        /*println!(
                             "{} {} {}",
                             ip_pkt.get_next_level_protocol(),
                             ip_pkt.get_source(),
                             ip_pkt.get_destination(),
-                        );
+                        );*/
                     }
                     return Ok(0);
                 } else {

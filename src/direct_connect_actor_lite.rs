@@ -6,11 +6,11 @@ use std::collections::{hash_map::Entry, HashMap};
 
 use iroh::{endpoint::Connection, protocol::ProtocolHandler, NodeAddr, NodeId};
 
-use crate::local_networking::Ipv4Pkg;
+use crate::{actor::{Action, Handle}, api_methods, local_networking::Ipv4Pkg};
 
 #[derive(Debug)]
 pub struct Direct {
-    api: tokio::sync::mpsc::Sender<Api>,
+    api: Handle<Actor>,
 }
 
 #[derive(Debug)]
@@ -18,24 +18,10 @@ struct Actor {
     peers: HashMap<NodeId, PeerState>,
     endpoint: iroh::endpoint::Endpoint,
     connection_tasks: JoinSet<(NodeId, (iroh::endpoint::SendStream, iroh::endpoint::RecvStream), Result<()>)>,
-    api: tokio::sync::mpsc::Receiver<Api>,
-    _api_tx: tokio::sync::mpsc::Sender<Api>,
+    handle: tokio::sync::mpsc::Receiver<Action<Actor>>,
     direct_connect_tx: tokio::sync::broadcast::Sender<DirectMessage>,
 }
 
-#[derive(Debug)]
-enum Api {
-    HandleConnection(Connection,tokio::sync::oneshot::Sender<Result<()>>),
-    HandleFrame(NodeId, Vec<u8>, tokio::sync::oneshot::Sender<Result<()>>),
-    RoutePacket(NodeId, DirectMessage, tokio::sync::oneshot::Sender<Result<()>>),
-    Reconnect(NodeId, tokio::sync::oneshot::Sender<Result<()>>),
-}
-
-#[derive(Debug)]
-struct Frame {
-    len: u32,
-    data: Vec<u8>,
-}
 
 #[derive(Debug, Serialize,Deserialize, Clone)]
 pub enum DirectMessage {
@@ -98,71 +84,44 @@ impl PeerState {
 }
 
 
+api_methods!(Handle<Actor>, Actor, {
+    fn handle_connection(conn: Connection) -> Result<()>;
+    fn route_packet(to: NodeId, pkg: DirectMessage) -> Result<()>;
+});
+
+
 impl Direct {
     pub const ALPN: &[u8] = b"/iroh/lan-direct/1";
     pub fn new(endpoint: iroh::endpoint::Endpoint, direct_connect_tx: tokio::sync::broadcast::Sender<DirectMessage>) -> Self {
-        let (api_tx, api_rx) = tokio::sync::mpsc::channel(1024);
-        let mut actor = Actor::new(api_tx.clone(), api_rx, endpoint, direct_connect_tx);
 
-        tokio::spawn(async move {
-            actor.spawn().await;
-        });
-
-        Self { api: api_tx }
+        let (api, rx) = Handle::<Actor>::channel(1024);
+        let mut actor = Actor {
+            peers: HashMap::new(),
+            endpoint,
+            connection_tasks: JoinSet::new(),
+            handle: rx,
+            direct_connect_tx,
+        };
+        tokio::spawn(async move { actor.run().await });
+        Self { api }
     }
-
-    pub async fn handle_connection(&self, conn: Connection) -> Result<()> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if self.api.send(Api::HandleConnection(conn, tx)).await.is_err() {
-            return Err(anyhow::anyhow!("Direct actor task has shut down"));
-        }
-        rx.await?
-    }
-
-    pub async fn route_packet(&self, to: NodeId, pkg: DirectMessage) -> Result<()> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if let Err(err) = self.api.send(Api::RoutePacket(to, pkg, tx)).await {
-            return Err(anyhow::anyhow!("Error routing packet: {err}"));
-        }
-        rx.await?
-    }
-
 }
 
 impl Actor {
 
-    pub fn new(api_tx: tokio::sync::mpsc::Sender<Api>, api_rx: tokio::sync::mpsc::Receiver<Api>, endpoint: iroh::endpoint::Endpoint, direct_connect_tx: tokio::sync::broadcast::Sender<DirectMessage>) -> Self {
-        Self {
-            peers: HashMap::new(),
-            endpoint,
-            connection_tasks: JoinSet::new(),
-            api: api_rx,
-            _api_tx: api_tx,
-            direct_connect_tx,
-        }
-    }
-
-    async fn spawn(&mut self) {
+    async fn run(&mut self) {
         loop {
             tokio::select! {
-                Some(api) = self.api.recv() => {
-                    match api {
-                        Api::HandleConnection(conn,resp) => {
-                            let res = self.handle_connection(conn).await;
-                            let _ = resp.send(res);
-                        },
-                        Api::HandleFrame(node_id, frame_buf, resp) => {
-                            let res = self.handle_frame(node_id, frame_buf).await;
-                            let _ = resp.send(res);
-                        },
-                        Api::RoutePacket(to, pkg, resp) => {
-                            let res = self.route_packet(to, pkg).await;
-                            let _ = resp.send(res);
-                        },
-                        Api::Reconnect(node_id, resp) => {
-                            let res = self.reconnect(node_id).await;
-                            let _ = resp.send(res);
-                        }
+                // Handle API actions
+                Some(action) = self.handle.recv() => {
+                    action(self).await;
+                }
+
+                // Keep your other selects (connection_tasks, timers, etc.)
+                Some(joined) = self.connection_tasks.join_next() => {
+                    if let Some((node_id, _streams, _res)) = joined.ok() {
+                        // handle completed connection loop if needed
+                        let _ = node_id;
                     }
                 }
             }
@@ -189,7 +148,6 @@ impl Actor {
             }
         };
 
-        let api_tx = self._api_tx.clone();
         // Spawn a task for this connection
         self.connection_tasks.spawn(
             async move {
@@ -211,9 +169,7 @@ impl Actor {
                             let frame_len = u32::from_be_bytes(frame_len_buf);
                             let mut frame_buf = vec![0u8; frame_len as usize];
                             if let Ok(Some(_)) = conn.1.read(&mut frame_buf).await {
-                                let (tx, rx) = tokio::sync::oneshot::channel();
-                                let _ = api_tx.send(Api::HandleFrame(remote_node_id, frame_buf, tx)).await;
-                                let _ = rx.await;
+                                let _ = self.handle_frame(remote_node_id, frame_buf).await;
                             } else {
                                 break;
                             }
@@ -247,15 +203,12 @@ impl Actor {
                 }
                 PeerState::Pending { node_id, queue  } => {
                     // reconnect and resend the packet
-                    let (tx,rx) = tokio::sync::oneshot::channel();
-                    if self._api_tx.send(Api::Reconnect(*node_id, tx)).await.is_err() || rx.await.is_err() {
+                    if self.reconnect(*node_id).await.is_err() {
                         return Err(anyhow::anyhow!("Failed to reconnect to peer"));
                     }
 
                     while let Some(pkg) = queue.pop() {
-                        let (tx,rx) = tokio::sync::oneshot::channel();
-                        if self._api_tx.send(Api::RoutePacket(*node_id, pkg, tx)).await.is_ok() {
-                            let _ = rx.await;
+                        if self.route_packet(*node_id, pkg).await.is_err() {
                         }
                     }
                 }
@@ -264,8 +217,7 @@ impl Actor {
             // insert as pending and try to connect
             println!("No connection to {}, reconnecting", to);
             self.peers.insert(to, PeerState::Pending { node_id: to, queue: vec![pkg] });
-            let (tx,rx) = tokio::sync::oneshot::channel();
-            if self._api_tx.send(Api::Reconnect(to, tx)).await.is_err() || rx.await.is_err() {
+            if self.reconnect(to).await.is_err() {
                 return Err(anyhow::anyhow!("Failed to reconnect to peer"));
             }
         }
