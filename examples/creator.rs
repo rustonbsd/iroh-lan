@@ -1,8 +1,10 @@
-use std::{io::Read, time::Duration};
-
-use iroh::{NodeId, SecretKey};
+use iroh::SecretKey;
 use iroh_lan::DirectMessage;
-use tokio::{signal::ctrl_c, time::sleep};
+use std::time::Duration;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    time::sleep,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,12 +27,38 @@ async fn main() -> anyhow::Result<()> {
 
     let my_ip = router.node_id_to_ip(router.node_id()).await?;
 
-    let (remote_writer, mut remote_reader) = tokio::sync::broadcast::channel(1024);
-    let tun = iroh_lan::Tun::new((my_ip.octets()[2], my_ip.octets()[3]), secret.public(), remote_writer)?;
+    let (remote_writer, mut remote_reader) = tokio::sync::mpsc::channel(1024);
+    let tun = iroh_lan::Tun::new(
+        (my_ip.octets()[2], my_ip.octets()[3]),
+        remote_writer,
+    )?;
     let mut direct_rx = router.subscribe_direct_connect();
+
+    tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind("172.22.0.2:8000")
+            .await
+            .unwrap();
+        while let Ok((mut stream, addr)) = listener.accept().await {
+            println!("Accepted connection from {}", addr);
+            tokio::spawn(async move {
+                let (mut reader, mut writer) = stream.split();
+                let mut buf = [0u8; 45];
+                while let Ok(n) = reader.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    if writer.write(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                    println!("echoed {} bytes to {}", n, addr);
+                }
+            });
+        }
+    });
+
     loop {
         tokio::select! {
-            Ok(tun_recv) = remote_reader.recv() => {
+            Some(tun_recv) = remote_reader.recv() => {
                 if let Ok(remote_node_id)  = router.ip_to_node_id(tun_recv.clone()).await {
                     if let Err(err) = router.direct.route_packet(remote_node_id, DirectMessage::IpPacket(tun_recv)).await {
                         println!("[ERROR] failed to route packet to {:?}", remote_node_id);

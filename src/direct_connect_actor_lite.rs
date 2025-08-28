@@ -50,7 +50,7 @@ impl PeerState {
         &mut self,
         send_tx: tokio::sync::mpsc::Sender<DirectMessage>,
         conn_id: ConnId,
-        node_id: NodeId,
+        _node_id: NodeId,
     ) -> Vec<DirectMessage> {
         match self {
             PeerState::Pending { queue, node_id } => {
@@ -67,7 +67,7 @@ impl PeerState {
                 active_send_tx,
                 active_conn_id,
                 other_conns,
-                node_id,
+                node_id: _node_id,
             } => {
                 // We already have an active connection. We keep the old connection intact,
                 // but only use the new connection for sending from now on.
@@ -125,6 +125,9 @@ impl Actor {
                         let _ = node_id;
                     }
                 }
+                _ = tokio::signal::ctrl_c() => {
+                    break
+                }
             }
         }
     }
@@ -160,9 +163,11 @@ impl Actor {
                         Some(msg) = send_rx.recv() => {
                             match msg {
                                 DirectMessage::IpPacket(pkg) => {
-                                    let bytes = pkg.to_ipv4_packet().packet().to_vec();
-                                    if let Err(_) = conn.0.write(&bytes).await {
-                                        break;
+                                    if let Ok(pkg) = pkg.to_ipv4_packet() {
+                                        let bytes = pkg.packet().to_vec();
+                                        if let Err(_) = conn.0.write(&bytes).await {
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -175,8 +180,10 @@ impl Actor {
                                 if let Ok(pkg) = serde_json::from_slice::<DirectMessage>(&frame_buf) {
                                     match pkg {
                                         DirectMessage::IpPacket(ip_pkg) => {
-                                            println!("Received packet from {}: dest: {} source: {}", remote_node_id, ip_pkg.to_ipv4_packet().get_destination(), ip_pkg.to_ipv4_packet().get_source());
-                                            let _ = direct_tx.send(DirectMessage::IpPacket(ip_pkg));
+                                            if let Ok(ip_pkg) = ip_pkg.to_ipv4_packet() {
+                                                println!("Received packet from {}: dest: {} source: {}", remote_node_id, ip_pkg.get_destination(), ip_pkg.get_source());
+                                                let _ = direct_tx.send(DirectMessage::IpPacket(ip_pkg.into()));
+                                            }
                                         }
                                     }
                                 }
@@ -203,7 +210,7 @@ impl Actor {
                     let node = *node_id;
                     queue.push(pkg);
                     let queued = std::mem::take(queue);
-                    drop(peer);
+                    let _ = peer;
 
                     if self.reconnect(node).await.is_err() {
                         if let Some(PeerState::Pending { queue, .. }) = self.peers.get_mut(&node) {

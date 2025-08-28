@@ -34,8 +34,8 @@ impl Ipv4Pkg {
 }
 
 pub struct Tun {
-    node_id: NodeId,
-    ip: Ipv4Addr,
+    _node_id: NodeId,
+    _ip: Ipv4Addr,
     inner: TunInner,
 }
 
@@ -73,7 +73,7 @@ impl Tun {
         let inner = TunInner::new(ip,remote_writer);
         inner.spawn(dev)?;
 
-        Ok(Self { node_id, ip, inner })
+        Ok(Self { _node_id: node_id, _ip: ip, inner })
     }
 
     pub async fn write(&self, pkg: Ipv4Pkg) -> Result<()> {
@@ -125,6 +125,7 @@ impl TunInner {
                             let _ = inner.write_tun(pkg).await;
                         } 
                     }
+                    /* re-emit the packet to the local network otherwise if ment for local it wouldn't ever be sent*/
                     tun_recv = tun_rx.recv() => {
                         if let Ok(pkg) = tun_recv {
                             let _ = dev.send(pkg.0.as_slice()).await;

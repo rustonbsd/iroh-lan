@@ -1,8 +1,8 @@
 use std::time::Duration;
-
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream, time::sleep};
-
-
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    time::sleep,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -12,7 +12,11 @@ async fn main() -> anyhow::Result<()> {
     let socket = tokio::net::TcpSocket::new_v4()?;
     socket.bind(local)?;
     let mut tcp_stream = socket.connect(remote).await?;
-    println!("Connected from {} to {}", tcp_stream.local_addr()?, tcp_stream.peer_addr()?);
+    println!(
+        "Connected from {} to {}",
+        tcp_stream.local_addr()?,
+        tcp_stream.peer_addr()?
+    );
 
     let (mut reader, mut writer) = tcp_stream.split();
     writer.write_all(b"Hello, world!").await?;

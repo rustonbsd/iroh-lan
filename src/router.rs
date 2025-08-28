@@ -177,7 +177,7 @@ impl Builder {
             }
         });
 
-        let (direct_connect_tx, direct_connect_rx) = tokio::sync::broadcast::channel(1024);
+        let (direct_connect_tx, _direct_connect_rx) = tokio::sync::broadcast::channel(1024);
         let direct = Direct::new(endpoint.clone(), direct_connect_tx.clone());
 
         let router = Router {
@@ -386,7 +386,7 @@ impl Router {
 
     // Returns the NodeId of the destination ipv4
     pub async fn ip_to_node_id(&self, pkg: Ipv4Pkg) -> Result<NodeId> {
-        let pkg = pkg.to_ipv4_packet();
+        let pkg = pkg.to_ipv4_packet()?;
         let dest = pkg.get_destination();
 
         let state = self.get_state().await?;
