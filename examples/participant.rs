@@ -1,8 +1,8 @@
-use std::{io::Read, time::Duration};
+use std::time::Duration;
 
-use iroh::{NodeId, SecretKey};
+use iroh::SecretKey;
 use iroh_lan::DirectMessage;
-use tokio::{signal::ctrl_c, time::sleep};
+use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -12,7 +12,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let secret = SecretKey::generate(&mut rand::thread_rng());
-
+    
     let router = iroh_lan::Router::builder()
         .entry_name("my-lan-party")
         .secret_key(secret.clone())
@@ -32,9 +32,6 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             Ok(tun_recv) = remote_reader.recv() => {
                 if let Ok(remote_node_id)  = router.ip_to_node_id(tun_recv.clone()).await {
-                    
-                    
-
                     if let Err(err) = router.direct.route_packet(remote_node_id, DirectMessage::IpPacket(tun_recv)).await {
                         println!("[ERROR] failed to route packet to {:?}", remote_node_id);
                         println!("Reason: {:?}", err);

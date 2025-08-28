@@ -14,7 +14,7 @@ use iroh::{Endpoint, SecretKey};
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
 use tokio::time::sleep;
 
-use crate::{local_networking::Ipv4Pkg, Direct};
+use crate::{local_networking::Ipv4Pkg, Direct, DirectMessage};
 
 #[derive(Debug)]
 pub struct Router {
@@ -24,8 +24,8 @@ pub struct Router {
     pub node_id: NodeId,
     _topic: Option<Topic<DefaultSecretRotation>>,
     pub direct: Arc<Direct>,
-    pub direct_connect_sender: tokio::sync::broadcast::Sender<crate::direct_connect::DirectMessage>,
-    pub _keep_alive_direct_connect_reader: tokio::sync::broadcast::Receiver<crate::direct_connect::DirectMessage>,
+    pub direct_connect_sender: tokio::sync::broadcast::Sender<DirectMessage>,
+    pub _keep_alive_direct_connect_reader: tokio::sync::broadcast::Receiver<DirectMessage>,
 }
 
 impl Clone for Router {
@@ -409,7 +409,7 @@ impl Router {
         Ok(*ip)
     }
 
-    pub fn subscribe_direct_connect(&self) -> tokio::sync::broadcast::Receiver<crate::direct_connect::DirectMessage> {
+    pub fn subscribe_direct_connect(&self) -> tokio::sync::broadcast::Receiver<DirectMessage> {
         self.direct_connect_sender.subscribe()
     }
 

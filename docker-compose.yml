@@ -1,0 +1,38 @@
+services:
+  participant:
+    image: participant:latest
+    container_name: participant
+    build:
+      context: .
+      dockerfile: Dockerfile_participant
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      - RUST_TRACEBACK=1
+    user: root
+    command: >
+      sh -c "participant"
+
+  creator:
+    image: creator:latest
+    container_name: creator
+    build:
+      context: .
+      dockerfile: Dockerfile_creator
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      - RUST_TRACEBACK=1
+    user: root
+    command: >
+      sh -c "creator"

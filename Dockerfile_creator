@@ -1,0 +1,27 @@
+FROM rust:1.89-slim-bullseye as builder
+
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY examples ./examples
+
+# test then build
+RUN cargo build --example creator
+RUN cargo build --example tcp_server
+
+# create a minimal runtime image
+FROM debian:bullseye-slim
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+
+
+# Copy the built binary from the builder stage
+COPY --from=builder /app/target/debug/examples/creator /usr/local/bin/creator
+COPY --from=builder /app/target/debug/examples/tcp_server /usr/local/bin/tcp_server
+
+# run creator and tcp_server
+CMD ["sh", "-c", "creator"]

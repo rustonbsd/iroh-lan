@@ -1,12 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use pnet_packet::Packet;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 use std::collections::{hash_map::Entry, HashMap};
 
-use iroh::{endpoint::Connection, protocol::ProtocolHandler, NodeAddr, NodeId};
+use iroh::{endpoint::Connection, protocol::ProtocolHandler, NodeId};
 
-use crate::{actor::{Action, Handle}, api_methods, local_networking::Ipv4Pkg};
+use crate::{actor::{Action, Handle}, local_networking::Ipv4Pkg};
 
 #[derive(Debug)]
 pub struct Direct {
@@ -83,13 +83,6 @@ impl PeerState {
     }
 }
 
-
-api_methods!(Handle<Actor>, Actor, {
-    fn handle_connection(conn: Connection) -> Result<()>;
-    fn route_packet(to: NodeId, pkg: DirectMessage) -> Result<()>;
-});
-
-
 impl Direct {
     pub const ALPN: &[u8] = b"/iroh/lan-direct/1";
     pub fn new(endpoint: iroh::endpoint::Endpoint, direct_connect_tx: tokio::sync::broadcast::Sender<DirectMessage>) -> Self {
@@ -104,6 +97,14 @@ impl Direct {
         };
         tokio::spawn(async move { actor.run().await });
         Self { api }
+    }
+
+    pub async fn handle_connection(&self, conn: Connection) -> Result<()> {
+        self.api.call(move |actor| Box::pin(actor.handle_connection(conn))).await
+    }
+
+    pub async fn route_packet(&self, to: NodeId, pkg: DirectMessage) -> Result<()> {
+        self.api.call(move |actor| Box::pin(actor.route_packet(to, pkg))).await
     }
 }
 
@@ -199,14 +200,31 @@ impl Actor {
                     active_send_tx.send(pkg).await.map_err(|e| anyhow::anyhow!("Failed to send packet to peer: {}", e))?;
                 }
                 PeerState::Pending { node_id, queue  } => {
-                    // reconnect and resend the packet
-                    if self.reconnect(*node_id).await.is_err() {
+                    let node = *node_id;
+                    queue.push(pkg);
+                    let queued = std::mem::take(queue);
+                    drop(peer);
+
+                    if self.reconnect(node).await.is_err() {
+                        if let Some(PeerState::Pending { queue, .. }) = self.peers.get_mut(&node) {
+                            queue.extend(queued.into_iter());
+                        }
                         return Err(anyhow::anyhow!("Failed to reconnect to peer"));
                     }
 
-                    while let Some(pkg) = queue.pop() {
-                        if self.route_packet(*node_id, pkg).await.is_err() {
+                    if let Some(peer) = self.peers.get_mut(&node) {
+                        match peer {
+                            PeerState::Active { active_send_tx, .. } => {
+                                for p in queued {
+                                    let _ = active_send_tx.send(p).await;
+                                }
+                            }
+                            PeerState::Pending { queue, .. } => {
+                                queue.extend(queued.into_iter());
+                            }
                         }
+                    } else {
+                        self.peers.insert(node, PeerState::Pending { node_id: node, queue: queued });
                     }
                 }
             }

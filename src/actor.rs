@@ -1,31 +1,18 @@
-#[macro_export]
-macro_rules! api_methods {
-    ($handle:ty, $actor:ty, {
-        $( fn $name:ident ( $( $arg:ident : $ty:ty ),* $(,)? ) -> $ret:ty ; )*
-        $( cast fn $cname:ident ( $( $carg:ident : $cty:ty ),* $(,)? ); )*
-    }) => {
-        impl $handle {
-            $( pub async fn $name(&self, $( $arg : $ty ),* ) -> $ret {
-                self.call(|a: &mut $actor| a.$name($( $arg ),*)).await
-            } )*
-            $( pub async fn $cname(&self, $( $carg : $cty ),* ) -> anyhow::Result<()> {
-                self.cast(|a: &mut $actor| a.$cname($( $carg ),*)).await
-            } )*
-        }
-    };
-}
-
-use anyhow::{Result, anyhow};
-use std::future::Future;
-use std::pin::Pin;
+// actor_lite.rs
+use anyhow::anyhow;
+use futures::future::BoxFuture;
 use tokio::sync::{mpsc, oneshot};
 
-pub type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+// Future that may borrow the actor for 'a.
+pub type ActorFut<'a, T> = BoxFuture<'a, T>;
 
-// Note the HRTB on the trait object here:
-pub type Action<A> = Box<dyn for<'a> FnOnce(&'a mut A) -> BoxFut<()> + Send + 'static>;
+// An action: given a mutable borrow of the actor, run an async op that may
+// borrow the actor for the duration of the await.
+pub type Action<A> = Box<
+    dyn for<'a> FnOnce(&'a mut A) -> ActorFut<'a, ()> + Send + 'static
+>;
 
-#[derive(Debug, Clone)]
+#[derive(Clone,Debug)]
 pub struct Handle<A> {
     tx: mpsc::Sender<Action<A>>,
 }
@@ -39,39 +26,35 @@ where
         (Self { tx }, rx)
     }
 
-    pub async fn call<R, Fut, F>(&self, f: F) -> Result<R>
+    // Ask: produce a future that may borrow the actor (HRTB), not 'static.
+    pub async fn call<R, F>(&self, f: F) -> anyhow::Result<R>
     where
         R: Send + 'static,
-        Fut: Future<Output = Result<R>> + Send + 'static,
-        F: for<'a> FnOnce(&'a mut A) -> Fut + Send + 'static,
+        F: for<'a> FnOnce(&'a mut A) -> ActorFut<'a, anyhow::Result<R>>
+            + Send
+            + 'static,
     {
-        let (rtx, rrx) = oneshot::channel::<Result<R>>();
-
-        let send_res = self
-            .tx
+        let (rtx, rrx) = oneshot::channel::<anyhow::Result<R>>();
+        self.tx
             .send(Box::new(move |actor: &mut A| {
-                let fut = f(actor);
+                // We’re inside the actor task; run the user future that may borrow `actor`.
                 Box::pin(async move {
-                    let res = fut.await;
+                    let res = f(actor).await;
                     let _ = rtx.send(res);
-                }) as BoxFut<()>
-            }) as Action<A>)
-            .await;
-
-        if send_res.is_err() {
-            return Err(anyhow!("actor stopped"));
-        }
-
+                })
+            }))
+            .await
+            .map_err(|_| anyhow!("actor stopped"))?;
         rrx.await.map_err(|_| anyhow!("actor stopped"))?
     }
 
-    pub async fn cast<Fut, F>(&self, f: F) -> Result<()>
+    // Cast: fire-and-forget. Same HRTB pattern.
+    pub async fn cast<F>(&self, f: F) -> anyhow::Result<()>
     where
-        Fut: Future<Output = ()> + Send + 'static,
-        F: for<'a> FnOnce(&'a mut A) -> Fut + Send + 'static,
+        F: for<'a> FnOnce(&'a mut A) -> ActorFut<'a, ()> + Send + 'static,
     {
         self.tx
-            .send(Box::new(move |actor: &mut A| Box::pin(f(actor)) as BoxFut<()>) as Action<A>)
+            .send(Box::new(move |actor: &mut A| f(actor)))
             .await
             .map_err(|_| anyhow!("actor stopped"))
     }

@@ -1954,6 +1954,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "distributed-topic-tracker",
+ "futures",
  "iroh",
  "iroh-gossip",
  "nix 0.30.1",

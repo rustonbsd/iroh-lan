@@ -12,7 +12,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let secret = SecretKey::generate(&mut rand::thread_rng());
-
     let router = iroh_lan::Router::builder()
         .entry_name("my-lan-party")
         .creator_mode()
