@@ -1,16 +1,12 @@
-use anyhow::{Result, bail};
-use iroh::NodeId;
-use pnet_packet::{
-    Packet,
-    ipv4::Ipv4Packet,
-};
-use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
+use anyhow::Result;
+use pnet_packet::{ip::IpNextHeaderProtocols, Packet, ipv4::Ipv4Packet};
+use serde::{Deserialize, Serialize};
 use tun_rs::{AsyncDevice, DeviceBuilder, Layer};
 
-use pnet_packet::ip::IpNextHeaderProtocols;
+use crate::actor::{Action, Handle};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash,Serialize,Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Ipv4Pkg(Vec<u8>);
 
 impl From<Ipv4Packet<'static>> for Ipv4Pkg {
@@ -19,49 +15,45 @@ impl From<Ipv4Packet<'static>> for Ipv4Pkg {
     }
 }
 
-impl From<Ipv4Pkg> for Ipv4Packet<'static> {
-    fn from(value: Ipv4Pkg) -> Self {
+impl TryFrom<Ipv4Pkg> for Ipv4Packet<'static> {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Ipv4Pkg) -> Result<Self> {
         let slice = value.0.into_boxed_slice();
         Ipv4Packet::new(Box::leak(slice))
-            .expect("Ipv4Pkg is only created via Ipv4Packet so this should be compatible")
+            .ok_or_else(|| anyhow::anyhow!("Invalid IPv4 packet"))
     }
 }
 
+
 impl Ipv4Pkg {
-    pub fn to_ipv4_packet(&self) -> Ipv4Packet<'static> {
-        self.clone().into()
+    pub fn new(buf: &Vec<u8>) -> Result<Self> {
+        let pkg = Ipv4Pkg(buf.clone());
+        pkg.to_ipv4_packet()?; // validate
+        Ok(pkg)
+    }
+
+    pub fn to_ipv4_packet(&self) -> Result<Ipv4Packet<'static>> {
+        self.clone().try_into()
     }
 }
 
 pub struct Tun {
-    _node_id: NodeId,
-    _ip: Ipv4Addr,
-    inner: TunInner,
+    api: Handle<TunActor>,
 }
 
-#[derive(Debug)]
-struct TunInner {
+struct TunActor {
     ip: Ipv4Addr,
-    tun_writer: tokio::sync::broadcast::Sender<Ipv4Pkg>,
-    remote_writer: tokio::sync::broadcast::Sender<Ipv4Pkg>,
-    _keepalive_tun_reader: tokio::sync::broadcast::Receiver<Ipv4Pkg>,
-    _keepalive_remote_reader: tokio::sync::broadcast::Receiver<Ipv4Pkg>,
-}
-
-impl Clone for TunInner {
-    fn clone(&self) -> Self {
-        Self {
-            ip: self.ip,
-            tun_writer: self.tun_writer.clone(),
-            remote_writer: self.remote_writer.clone(),
-            _keepalive_tun_reader: self.tun_writer.subscribe(),
-            _keepalive_remote_reader: self.remote_writer.subscribe(),
-        }
-    }
+    dev: AsyncDevice,
+    rx: tokio::sync::mpsc::Receiver<Action<TunActor>>,
+    to_remote_writer: tokio::sync::mpsc::Sender<Ipv4Pkg>,
 }
 
 impl Tun {
-    pub fn new(free_ip_ending: (u8, u8), node_id: NodeId, remote_writer: tokio::sync::broadcast::Sender<Ipv4Pkg>) -> Result<Self> {
+    pub fn new(
+        free_ip_ending: (u8, u8),
+        to_remote_writer: tokio::sync::mpsc::Sender<Ipv4Pkg>,
+    ) -> Result<Self> {
         let ip = Ipv4Addr::new(172, 22, free_ip_ending.0, free_ip_ending.1);
         let dev = DeviceBuilder::new()
             // .name("feth0")
@@ -70,127 +62,74 @@ impl Tun {
             .mtu(1400)
             .build_async()?;
 
-        let inner = TunInner::new(ip,remote_writer);
-        inner.spawn(dev)?;
+        let (api, rx) = Handle::<TunActor>::channel(1024);
 
-        Ok(Self { _node_id: node_id, _ip: ip, inner })
+        tokio::spawn(async move {
+            let mut actor = TunActor {
+                ip,
+                to_remote_writer,
+                dev,
+                rx,
+            };
+            let _ = actor.run().await;
+        });
+
+        Ok(Self { api })
     }
 
     pub async fn write(&self, pkg: Ipv4Pkg) -> Result<()> {
-        self.inner.write_tun(pkg).await
+        self.api.call(move |actor| Box::pin(actor.write_to_tun(pkg))).await
     }
 }
 
-impl TunInner {
-    pub fn new(ip: Ipv4Addr, remote_writer: tokio::sync::broadcast::Sender<Ipv4Pkg>) -> Self {
-        let (tun_writer, mut tun_reader) = tokio::sync::broadcast::channel(1024);
-        let _keepalive_tun_writer = tun_writer.subscribe();
-        let _keepalive_remote_reader = remote_writer.subscribe();
+impl TunActor {
+    async fn run(&mut self) -> Result<()> {
+        let mut len = 0;
+        let mut dev_buf = [0u8; 65536 + 14];
+        loop {
+            tokio::select! {
 
-        // keep sender alive by having a single receiver at all times
-        tokio::spawn({
-            async move {
-                while tun_reader.recv().await.is_ok() {}
-                println!("debug: TunInner channel rx dropped");
-            }
-        });
+                // Handle API actions
+                Some(action) = self.rx.recv() => {
+                    action(self).await;
+                }
+                Ok(size) = self.dev.recv(&mut dev_buf) => {
+                    len += size;
+                    if let Ok(ip_pkg) = Ipv4Pkg::new(&dev_buf[..len].to_vec()) {
+                        let ip_pkg = ip_pkg.to_ipv4_packet().expect("this should have been validated during 'Ipv4Pkg::new' creation");
+                        if matches!(
+                            ip_pkg.get_next_level_protocol(),
+                            IpNextHeaderProtocols::Tcp | IpNextHeaderProtocols::Udp
+                        ) {
+                            // if packet is ment for local ip: write
+                            // if ment for ip of remote node: vpn -> write
 
-        Self {
-            tun_writer,
-            remote_writer,
-            ip,
-            _keepalive_tun_reader: _keepalive_tun_writer,
-            _keepalive_remote_reader,
-        }
-    }
+                            if ip_pkg.get_destination() == self.ip {
+                                let _ = self.dev.send(ip_pkg.packet()).await;
+                            } else {
+                                let _ = self.to_remote_writer.send(ip_pkg.into()).await;
+                            }
 
-    pub fn spawn(&self, dev: AsyncDevice) -> Result<()> {
-        let inner = self.clone();
-        tokio::spawn(async move {
-            let mut len = 0;
-            let mut buf = [0u8; 65536 + 14];
-            let mut remote_rx = inner.remote_writer.subscribe();
-            let mut tun_rx = inner.tun_writer.subscribe();
-            loop {
-                tokio::select! {
-                    recv = dev.recv(&mut buf) => {
-                        if let Ok(_len) = handle_recv(recv,&buf,len,&inner).await {
-                            len = _len;
-                        } else {
-                            println!("[ERROR] dev.recv failed");
+                            /*println!(
+                                "{} {} {}",
+                                ip_pkt.get_next_level_protocol(),
+                                ip_pkt.get_source(),
+                                ip_pkt.get_destination(),
+                            );*/
                         }
-                    }
-                    remote_recv = remote_rx.recv() => {
-                        if let Ok(pkg) = remote_recv {
-                            let _ = inner.write_tun(pkg).await;
-                        } 
-                    }
-                    /* re-emit the packet to the local network otherwise if ment for local it wouldn't ever be sent*/
-                    tun_recv = tun_rx.recv() => {
-                        if let Ok(pkg) = tun_recv {
-                            let _ = dev.send(pkg.0.as_slice()).await;
-                        }
-                    }
-                    _ = tokio::signal::ctrl_c() => {
-                        ctrl_c();
-                        break
                     }
                 }
-            }
-        });
-
-        async fn handle_recv(
-            recv: Result<usize, std::io::Error>,
-            buf: &[u8],
-            len: usize,
-            inner: &TunInner,
-        ) -> Result<usize> {
-            let mut len = len;
-            if let Ok(size) = recv {
-                len += size;
-                if let Some(ip_pkt) = pnet_packet::ipv4::Ipv4Packet::new(&buf[..len]) {
-                    if matches!(
-                        ip_pkt.get_next_level_protocol(),
-                        IpNextHeaderProtocols::Tcp | IpNextHeaderProtocols::Udp
-                    ) {
-                        // if packet is ment for local ip: write
-                        // if ment for ip of remote node: vpn -> write
-
-                        let pkg = Ipv4Pkg(ip_pkt.packet().to_vec());
-                        if ip_pkt.get_destination() == inner.ip {
-                            let _ = inner.write_tun(pkg).await;
-                        } else {
-                            let _ = inner.write_remote(pkg).await;
-                        }
-
-                        /*println!(
-                            "{} {} {}",
-                            ip_pkt.get_next_level_protocol(),
-                            ip_pkt.get_source(),
-                            ip_pkt.get_destination(),
-                        );*/
-                    }
-                    return Ok(0);
-                } else {
-                    return Ok(len);
+                _ = tokio::signal::ctrl_c() => {
+                    break
                 }
             }
-            bail!("failed to handle")
-        }
-
-        fn ctrl_c() {
-            println!("quitting");
         }
         Ok(())
     }
 
-    pub async fn write_tun(&self, pkg: Ipv4Pkg) -> Result<()> {
-        self.tun_writer.send(pkg)?;
-        Ok(())
-    }
-
-    pub async fn write_remote(&self, pkg: Ipv4Pkg) -> Result<()> {
-        self.remote_writer.send(pkg)?;
+    // validated write
+    pub async fn write_to_tun(&self, pkg: Ipv4Pkg) -> Result<()> {
+        self.dev.send(pkg.to_ipv4_packet()?.packet()).await?;
         Ok(())
     }
 }

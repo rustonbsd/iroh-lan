@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.99"
-distributed-topic-tracker = "0.1.3"
+distributed-topic-tracker = "0.1.5"
 iroh = "0.91.2"
 iroh-gossip = "0.91.0"
 runas = "1.2.0"

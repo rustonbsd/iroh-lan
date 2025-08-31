@@ -1,28 +1,29 @@
 use std::{
-    collections::HashMap, net::Ipv4Addr, sync::Arc, time::{Duration, SystemTime}
+    collections::HashMap,
+    net::Ipv4Addr,
+    sync::Arc,
+    time::{Duration, SystemTime},
 };
 
 use distributed_topic_tracker::{
-    AutoDiscoveryGossip, GossipReceiver, GossipSender, Topic, TopicId,
+    AutoDiscoveryGossip, GossipReceiver, GossipSender, RecordPublisher, Topic, TopicId,
 };
 use iroh::NodeId;
 use serde::{Deserialize, Serialize};
 
 use anyhow::{Context, Result, bail};
-use distributed_topic_tracker::{AutoDiscoveryBuilder, DefaultSecretRotation};
 use iroh::{Endpoint, SecretKey};
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
 use tokio::time::sleep;
 
-use crate::{local_networking::Ipv4Pkg, Direct, DirectMessage};
+use crate::{Direct, DirectMessage, local_networking::Ipv4Pkg};
 
-#[derive(Debug)]
 pub struct Router {
     pub gossip_sender: GossipSender,
     pub gossip_receiver: GossipReceiver,
     router_requester: tokio::sync::mpsc::Sender<RouterRequest>,
     pub node_id: NodeId,
-    _topic: Option<Topic<DefaultSecretRotation>>,
+    _topic: Option<Topic>,
     pub direct: Arc<Direct>,
     pub direct_connect_sender: tokio::sync::broadcast::Sender<DirectMessage>,
     pub _keep_alive_direct_connect_reader: tokio::sync::broadcast::Receiver<DirectMessage>,
@@ -118,11 +119,10 @@ impl Builder {
 
         let gossip = Gossip::builder()
             .membership_config(gossip_config)
-            .spawn_with_auto_discovery::<DefaultSecretRotation>(endpoint.clone(), None)
-            .await?;
+            .spawn(endpoint.clone());
         println!("2");
         let _router = iroh::protocol::Router::builder(endpoint.clone())
-            .accept(iroh_gossip::ALPN, gossip.gossip.clone())
+            .accept(iroh_gossip::ALPN, gossip.clone())
             .spawn();
         println!("3");
 
@@ -130,23 +130,24 @@ impl Builder {
         let secret_initials = format!("{topic_initials}-secret").as_bytes().to_vec();
 
         println!("4");
+        let record_publisher = RecordPublisher::new(
+            TopicId::new(topic_initials),
+            endpoint.node_id(),
+            self.secret_key.secret().clone(),
+            None,
+            secret_initials,
+        );
         let topic = if self.creator_mode {
             gossip
-                .subscribe_and_join_with_auto_discovery(
-                    TopicId::new(topic_initials),
-                    secret_initials,
-                )
+                .subscribe_and_join_with_auto_discovery_no_wait(record_publisher)
                 .await?
         } else {
             gossip
-                .subscribe_and_join_with_auto_discovery(
-                    TopicId::new(topic_initials),
-                    secret_initials,
-                )
+                .subscribe_and_join_with_auto_discovery(record_publisher)
                 .await?
         };
 
-        let (gossip_sender, gossip_receiver) = topic.split();
+        let (gossip_sender, gossip_receiver) = topic.split().await?;
 
         println!("5");
 
@@ -232,8 +233,7 @@ impl Router {
 
     async fn spawn(&self) -> Result<()> {
         println!("router.spawn");
-        let mut recv = self.gossip_receiver.clone().subscribe().await?;
-        while let Ok(event) = recv.recv().await {
+        while let Some(Ok(event)) = self.gossip_receiver.next().await {
             if let iroh_gossip::api::Event::Received(message) = event {
                 if let Ok(router_msg) =
                     serde_json::from_slice::<RouterMessage>(message.content.to_vec().as_slice())
