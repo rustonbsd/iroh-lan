@@ -18,7 +18,7 @@ struct Actor {
     peers: HashMap<NodeId, PeerState>,
     endpoint: iroh::endpoint::Endpoint,
     connection_tasks: JoinSet<(NodeId, (iroh::endpoint::SendStream, iroh::endpoint::RecvStream), Result<()>)>,
-    handle: tokio::sync::mpsc::Receiver<Action<Actor>>,
+    rx: tokio::sync::mpsc::Receiver<Action<Actor>>,
     direct_connect_tx: tokio::sync::broadcast::Sender<DirectMessage>,
 }
 
@@ -50,8 +50,9 @@ impl PeerState {
         &mut self,
         send_tx: tokio::sync::mpsc::Sender<DirectMessage>,
         conn_id: ConnId,
-        _node_id: NodeId,
+        node_id: NodeId,
     ) -> Vec<DirectMessage> {
+        println!("Accepting new DIRECT connection for peer: {node_id}");
         match self {
             PeerState::Pending { queue, node_id } => {
                 let queue = std::mem::take(queue);
@@ -92,7 +93,7 @@ impl Direct {
             peers: HashMap::new(),
             endpoint,
             connection_tasks: JoinSet::new(),
-            handle: rx,
+            rx,
             direct_connect_tx,
         };
         tokio::spawn(async move { actor.run().await });
@@ -114,7 +115,7 @@ impl Actor {
         loop {
             tokio::select! {
                 // Handle API actions
-                Some(action) = self.handle.recv() => {
+                Some(action) = self.rx.recv() => {
                     action(self).await;
                 }
 
@@ -133,7 +134,7 @@ impl Actor {
     }
 
     async fn handle_connection(&mut self, conn: iroh::endpoint::Connection) -> Result<()> {
-
+        println!("New direct connection from {:?}", conn.remote_node_id()?);
         let (send_tx, mut send_rx) = tokio::sync::mpsc::channel(1024);
         let conn_id = conn.stable_id();
         let remote_node_id = conn.remote_node_id()?;

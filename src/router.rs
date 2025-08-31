@@ -238,7 +238,7 @@ impl Router {
                 if let Ok(router_msg) =
                     serde_json::from_slice::<RouterMessage>(message.content.to_vec().as_slice())
                 {
-                    println!("{router_msg:?}");
+                    println!("route: {router_msg:?}");
                     match router_msg {
                         RouterMessage::StateMessage(state_message) => {
                             if let Ok(state) = self.get_state().await {

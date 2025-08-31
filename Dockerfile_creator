@@ -7,8 +7,8 @@ COPY src ./src
 COPY examples ./examples
 
 # test then build
-RUN cargo build --example creator
 RUN cargo build --example tcp_server
+RUN cargo build --example creator
 
 # create a minimal runtime image
 FROM debian:bullseye-slim
@@ -20,8 +20,8 @@ RUN apt-get update && apt-get install -y \
 
 
 # Copy the built binary from the builder stage
-COPY --from=builder /app/target/debug/examples/creator /usr/local/bin/creator
 COPY --from=builder /app/target/debug/examples/tcp_server /usr/local/bin/tcp_server
+COPY --from=builder /app/target/debug/examples/creator /usr/local/bin/creator
 
 # run creator and tcp_server
 CMD ["sh", "-c", "creator"]
