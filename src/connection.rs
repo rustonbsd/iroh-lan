@@ -46,18 +46,21 @@ impl Actor for ConnActor {
                     action(self).await;
                 }
                 _ = self.send_stream.stopped() => {
+                    println!("Send stream stopped");
                     let _ = self.try_reconnect().await;
                 }
                 stream_recv = self.recv_stream.read_u32_le() => {
                     if let Ok(frame_size) = stream_recv {
                         let _res = self.remote_read_next(frame_size).await;
+                        println!("received next stream: {}", _res.is_ok())
                     }
                 }
                 _ = self.sender_notify.notified() => {
-                    let _ = self.remote_write_next().await;
+                    let _res = self.remote_write_next().await;
+                    println!("Sending next frame: {}", _res.is_ok());
                 }
                 _ = self.receiver_notify.notified() => {
-
+                    println!("Receiving next frame");
                     if let Some(msg) = self.receiver_queue.back() {
                         if self.external_sender.send(msg.clone()).is_err() {
                             return Err(anyhow::anyhow!("external sender closed"));
