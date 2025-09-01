@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, time::Duration};
 
 use crate::{
     DirectMessage,
@@ -28,6 +28,9 @@ struct ConnActor {
     send_stream: SendStream,
     recv_stream: RecvStream,
     endpoint: Endpoint,
+
+    last_reconnect: u64,
+    reconnect_backoff: u64,
 
     external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
 
@@ -132,6 +135,8 @@ impl ConnActor {
             endpoint,
             receiver_notify: tokio::sync::Notify::new(),
             sender_notify: tokio::sync::Notify::new(),
+            last_reconnect: 0,
+            reconnect_backoff: 0,
         })
     }
 
@@ -155,6 +160,15 @@ impl ConnActor {
     }
 
     async fn try_reconnect(&mut self) -> Result<()> {
+        let now = tokio::time::Instant::now().elapsed().as_secs();
+
+        if !self.last_reconnect == 0 && self.last_reconnect + self.reconnect_backoff > now {
+            tokio::time::sleep(Duration::from_secs((self.last_reconnect + self.reconnect_backoff) - now)).await;
+            self.reconnect_backoff += 1;
+        }
+
+        self.last_reconnect = tokio::time::Instant::now().elapsed().as_secs();
+
         if self.conn.close_reason().is_none() {
             return Ok(());
         }
@@ -166,6 +180,7 @@ impl ConnActor {
         self.send_stream = send_stream;
         self.recv_stream = recv_stream;
         self.conn = conn;
+        self.reconnect_backoff = 0;
         Ok(())
     }
 
