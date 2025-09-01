@@ -94,7 +94,6 @@ impl Actor {
     async fn route_packet(&mut self, to: NodeId, pkg: DirectMessage) -> Result<()> {
         match self.peers.entry(to) {
             Entry::Occupied(entry) => {
-                println!("Routing packet to existing peer {}", to);
                 entry.get().write(pkg).await?;
             }
             Entry::Vacant(entry) => {

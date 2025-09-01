@@ -112,7 +112,6 @@ impl Builder {
             .secret_key(self.secret_key.clone())
             .bind()
             .await?;
-        println!("1");
 
         let gossip_config = HyparviewConfig {
             neighbor_request_timeout: Duration::from_millis(2000),
@@ -123,21 +122,17 @@ impl Builder {
             .membership_config(gossip_config)
             .spawn(endpoint.clone());
 
-        
         let (direct_connect_tx, _direct_connect_rx) = tokio::sync::broadcast::channel(1024);
         let direct = Direct::new(endpoint.clone(), direct_connect_tx.clone());
 
-        println!("2");
         let _router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(iroh_gossip::ALPN, gossip.clone())
             .accept(crate::Direct::ALPN, direct.clone())
             .spawn();
-        println!("3");
 
         let topic_initials = format!("lanparty-{}", self.entry_name);
         let secret_initials = format!("{topic_initials}-secret").as_bytes().to_vec();
 
-        println!("4");
         let record_publisher = RecordPublisher::new(
             TopicId::new(topic_initials),
             endpoint.node_id(),
@@ -156,8 +151,6 @@ impl Builder {
         };
 
         let (gossip_sender, gossip_receiver) = topic.split().await?;
-
-        println!("5");
 
         let (router_state_sender, router_state_reader) = tokio::sync::mpsc::channel(1024);
 
@@ -178,14 +171,11 @@ impl Builder {
             last_leader_msg: None,
         };
 
-        println!("7");
-
         tokio::spawn({
             async move {
                 router_state.spawn(router_state_reader).await;
             }
         });
-
 
         let router = Router {
             gossip_sender,
@@ -206,18 +196,13 @@ impl Builder {
             }
         });
 
-        println!("8");
         if !self.creator_mode {
             sleep(Duration::from_secs(5)).await;
-            println!("1");
             let data = serde_json::to_vec(&RouterMessage::ReqMessage(ReqMessage {
                 node_id: endpoint.node_id(),
             }))?;
-            println!("1");
             router.gossip_sender.broadcast(data).await?;
-            println!("1");
         }
-        println!("finished:");
 
         Ok(router)
     }
@@ -245,7 +230,6 @@ impl Router {
                 if let Ok(router_msg) =
                     serde_json::from_slice::<RouterMessage>(message.content.to_vec().as_slice())
                 {
-                    println!("route: {router_msg:?}");
                     match router_msg {
                         RouterMessage::StateMessage(state_message) => {
                             if let Ok(state) = self.get_state().await {
@@ -262,7 +246,6 @@ impl Router {
                             }
                         }
                         RouterMessage::ReqMessage(req_message) => {
-                            println!("start: req_message {req_message:?}");
                             if let Ok(state) = self.get_state().await {
                                 if let Some(leader) = state.leader {
                                     if leader == self.node_id {
@@ -289,12 +272,10 @@ impl Router {
                                                         .expect("serialization failed");
                                                     let _ =
                                                         self.gossip_sender.broadcast(data).await;
-
-                                                    println!("end: req_message");
                                                 }
                                             }
                                         } else {
-                                            println!("get next ip failed");
+                                            //println!("get next ip failed");
                                         }
                                     }
                                 }
@@ -302,26 +283,23 @@ impl Router {
                         }
                     }
                 } else {
-                    println!("Failed to deserialize gossip message");
+                    //println!("Failed to deserialize gossip message");
                 }
             }
         }
 
-        println!("Failed!!!!");
+        //println!("Failed!!!!");
         Ok(())
     }
 
     async fn get_next_ip(&self) -> Result<Ipv4Addr> {
-        println!("a");
         let state = self.get_state().await?;
-        println!("b");
         let &highest_ip = state
             .node_id_ip_dict
             .values()
             .max_by_key(|&ip| ip.octets()[2] as u16 * 256u16 + ip.octets()[3] as u16)
             .unwrap_or(&Ipv4Addr::new(172, 22, 0, 3));
 
-        println!("c");
         let next_ip = Ipv4Addr::new(
             172,
             22,
@@ -333,26 +311,18 @@ impl Router {
             },
         );
 
-        println!("d: {next_ip}");
         // to avoid overflow and therfore dublicates we check if this ip is already contained
         if state.node_id_ip_dict.values().any(|v| v.eq(&next_ip)) {
-            println!("e");
             bail!("invalid ip")
         }
 
-        println!("f");
         Ok(next_ip)
     }
 
     async fn add_node_id_ip(&self, node_id: NodeId, ip: Ipv4Addr) -> Result<()> {
-        println!("1");
         let mut state = self.get_state().await?;
-        println!("2");
         let _ = state.node_id_ip_dict.insert(node_id, ip);
-        println!("3");
         self.set_node_id_ip_dict(state.node_id_ip_dict).await?;
-        println!("4");
-
         Ok(())
     }
 

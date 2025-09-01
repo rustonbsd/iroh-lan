@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let mut direct_rx = router.subscribe_direct_connect();
 
+    /*
     tokio::spawn(async move {
         sleep(Duration::from_secs(10)).await;
         println!("Connecting to echo server...");
@@ -79,6 +80,9 @@ async fn main() -> anyhow::Result<()> {
             println!("echoed {} bytes to {}", frame_size, local);
         }
     });
+    */
+
+    println!("My IP: {}", my_ip);
 
     loop {
         tokio::select! {

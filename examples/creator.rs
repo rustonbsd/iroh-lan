@@ -34,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let mut direct_rx = router.subscribe_direct_connect();
 
+    /*
     tokio::spawn(async move {
         let listener = tokio::net::TcpListener::bind("172.22.0.2:8000")
             .await
@@ -64,6 +65,9 @@ async fn main() -> anyhow::Result<()> {
             });
         }
     });
+    */
+
+    println!("My IP: {}", my_ip);
 
     loop {
         tokio::select! {
