@@ -99,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(direct_msg) = direct_rx.recv() => {
                 match direct_msg {
                     DirectMessage::IpPacket(ip_pkg) => {
+                        println!("WRITE TUN: {:?}", ip_pkg.to_ipv4_packet()?.get_destination());
                         tun.write(ip_pkg).await?;
                     }
                 }

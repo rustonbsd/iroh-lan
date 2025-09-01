@@ -12,14 +12,14 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct Direct {
-    api: Handle<Actor>,
+    api: Handle<DirectActor>,
 }
 
 #[derive(Debug)]
-struct Actor {
+struct DirectActor {
     peers: HashMap<NodeId, Conn>,
     endpoint: iroh::endpoint::Endpoint,
-    rx: tokio::sync::mpsc::Receiver<Action<Actor>>,
+    rx: tokio::sync::mpsc::Receiver<Action<DirectActor>>,
     direct_connect_tx: tokio::sync::broadcast::Sender<DirectMessage>,
 }
 
@@ -34,8 +34,8 @@ impl Direct {
         endpoint: iroh::endpoint::Endpoint,
         direct_connect_tx: tokio::sync::broadcast::Sender<DirectMessage>,
     ) -> Self {
-        let (api, rx) = Handle::<Actor>::channel(1024);
-        let mut actor = Actor {
+        let (api, rx) = Handle::<DirectActor>::channel(1024);
+        let mut actor = DirectActor {
             peers: HashMap::new(),
             endpoint,
             rx,
@@ -58,7 +58,7 @@ impl Direct {
     }
 }
 
-impl Actor {
+impl DirectActor {
     async fn run(&mut self) {
         loop {
             tokio::select! {
