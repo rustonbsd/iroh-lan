@@ -1,9 +1,10 @@
-use std::time::Duration;
+use std::{ net::TcpStream, time::Duration};
 
 use iroh::SecretKey;
 use iroh_lan::DirectMessage;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncReadExt,
+    io::AsyncWriteExt,
     time::sleep,
 };
 
@@ -43,24 +44,39 @@ async fn main() -> anyhow::Result<()> {
         let socket = tokio::net::TcpSocket::new_v4().unwrap();
         socket.bind(local).unwrap();
         let mut tcp_stream = socket.connect(remote).await.unwrap();
+        //let mut tcp_stream = TcpStream::connect(remote).unwrap();
+        println!("Connected to echo server, local addr: {}", tcp_stream.local_addr().unwrap());
         println!(
             "Connected from {} to {}",
             tcp_stream.local_addr().unwrap(),
             tcp_stream.peer_addr().unwrap()
         );
 
-        let (mut reader, mut writer) = tcp_stream.split();
-        writer.write_all(b"Hello, world!").await.unwrap();
-        let mut buf = [0u8; 45];
-        while let Ok(n) = reader.read(&mut buf).await {
-            if n == 0 {
+        let (mut receiver, mut sender) = tcp_stream.split();
+        let _ =  sender.write_u32_le(8).await;
+        let buf = [222u8; 8];
+        let _ = sender.write(&buf).await;
+
+        while let Ok(frame_size) = receiver.read_u32_le().await {
+            if frame_size == 0 {
+                println!("Connection closed frame size == 0");
                 break;
             }
-            sleep(Duration::from_millis(10000)).await;
-            if writer.write(&buf[..n]).await.is_err() {
+            
+            let mut buf = Vec::with_capacity(frame_size as usize);
+            if receiver.read(buf.as_mut_slice()).await.is_err() {
+                println!("failed to read from stream, closing");
+                break;
+            } else {
+                println!("read {} bytes from echo server", frame_size);
+            }
+            sleep(Duration::from_millis(1000)).await;
+            let _ = sender.write_u32_le(frame_size).await;
+            if sender.write(&buf).await.is_err() {
+                println!("failed to write to stream, closing");
                 break;
             }
-            println!("echoed {} bytes to {}", n, local);
+            println!("echoed {} bytes to {}", frame_size, local);
         }
     });
 

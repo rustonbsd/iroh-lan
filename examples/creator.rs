@@ -41,16 +41,25 @@ async fn main() -> anyhow::Result<()> {
         while let Ok((mut stream, addr)) = listener.accept().await {
             println!("Accepted connection from {}", addr);
             tokio::spawn(async move {
+                
                 let (mut reader, mut writer) = stream.split();
-                let mut buf = [0u8; 45];
-                while let Ok(n) = reader.read(&mut buf).await {
-                    if n == 0 {
+
+                while let Ok(frame_size) = reader.read_u32_le().await {
+                    if frame_size == 0 {
+                        println!("Connection closed by peer due to frame size == 0");
                         break;
                     }
-                    if writer.write(&buf[..n]).await.is_err() {
+                    let mut buf = Vec::with_capacity(frame_size as usize);
+                    if reader.read(buf.as_mut_slice()).await.is_err() {
+                        println!("failed to read from stream, closing");
                         break;
                     }
-                    println!("echoed {} bytes to {}", n, addr);
+                    let _ = writer.write_u32_le(frame_size).await;
+                    if writer.write(buf.as_slice()).await.is_err() {
+                        println!("failed to write to stream, closing");
+                        break;
+                    }
+                    println!("echoed {} bytes to {}", frame_size, addr);
                 }
             });
         }

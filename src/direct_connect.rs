@@ -10,7 +10,7 @@ use crate::{
     local_networking::Ipv4Pkg,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Direct {
     api: Handle<Actor>,
 }
@@ -81,8 +81,9 @@ impl Actor {
                 entry.get_mut().incoming_connection(conn).await?;
             }
             Entry::Vacant(entry) => {
+                let (send_stream, recv_stream) = conn.accept_bi().await?;
                 entry.insert(
-                    Conn::new(self.endpoint.clone(), conn, self.direct_connect_tx.clone()).await?,
+                    Conn::new(self.endpoint.clone(), conn, send_stream, recv_stream, self.direct_connect_tx.clone()).await?,
                 );
             }
         }
@@ -93,13 +94,20 @@ impl Actor {
     async fn route_packet(&mut self, to: NodeId, pkg: DirectMessage) -> Result<()> {
         match self.peers.entry(to) {
             Entry::Occupied(entry) => {
+                println!("Routing packet to existing peer {}", to);
                 entry.get().write(pkg).await?;
             }
             Entry::Vacant(entry) => {
+                println!("Creating new connection to peer {}", to);
                 let quic_conn = self.endpoint.connect(to, Direct::ALPN).await?;
+                let (send_stream, recv_stream) = quic_conn.open_bi().await?;
+
+                println!("Connected to peer {}", to);
                 let conn = Conn::new(
                     self.endpoint.clone(),
                     quic_conn,
+                    send_stream,
+                    recv_stream,
                     self.direct_connect_tx.clone(),
                 )
                 .await?;

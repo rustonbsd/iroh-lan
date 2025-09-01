@@ -1,10 +1,11 @@
 services:
   participant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: participant-runtime
     image: participant:latest
     container_name: participant
-    build:
-      context: .
-      dockerfile: Dockerfile_participant
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -15,15 +16,15 @@ services:
     environment:
       - RUST_TRACEBACK=1
     user: root
-    command: >
-      sh -c "participant"
+    command: sh -c "participant"
 
   creator:
-    image: creator:latest
-    container_name: creator
     build:
       context: .
-      dockerfile: Dockerfile_creator
+      dockerfile: Dockerfile
+      target: creator-runtime
+    image: creator:latest
+    container_name: creator
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -34,5 +35,4 @@ services:
     environment:
       - RUST_TRACEBACK=1
     user: root
-    command: >
-      sh -c "creator"
+    command: sh -c "creator"

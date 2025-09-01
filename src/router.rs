@@ -22,6 +22,7 @@ pub struct Router {
     pub gossip_sender: GossipSender,
     pub gossip_receiver: GossipReceiver,
     router_requester: tokio::sync::mpsc::Sender<RouterRequest>,
+    _router: iroh::protocol::Router,
     pub node_id: NodeId,
     _topic: Option<Topic>,
     pub direct: Arc<Direct>,
@@ -34,6 +35,7 @@ impl Clone for Router {
         Self {
             gossip_sender: self.gossip_sender.clone(),
             gossip_receiver: self.gossip_receiver.clone(),
+            _router: self._router.clone(),
             router_requester: self.router_requester.clone(),
             node_id: self.node_id.clone(),
             _topic: None,
@@ -120,9 +122,15 @@ impl Builder {
         let gossip = Gossip::builder()
             .membership_config(gossip_config)
             .spawn(endpoint.clone());
+
+        
+        let (direct_connect_tx, _direct_connect_rx) = tokio::sync::broadcast::channel(1024);
+        let direct = Direct::new(endpoint.clone(), direct_connect_tx.clone());
+
         println!("2");
         let _router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(iroh_gossip::ALPN, gossip.clone())
+            .accept(crate::Direct::ALPN, direct.clone())
             .spawn();
         println!("3");
 
@@ -139,7 +147,7 @@ impl Builder {
         );
         let topic = if self.creator_mode {
             gossip
-                .subscribe_and_join_with_auto_discovery_no_wait(record_publisher)
+                .subscribe_and_join_with_auto_discovery(record_publisher)
                 .await?
         } else {
             gossip
@@ -178,8 +186,6 @@ impl Builder {
             }
         });
 
-        let (direct_connect_tx, _direct_connect_rx) = tokio::sync::broadcast::channel(1024);
-        let direct = Direct::new(endpoint.clone(), direct_connect_tx.clone());
 
         let router = Router {
             gossip_sender,
@@ -190,6 +196,7 @@ impl Builder {
             direct: Arc::new(direct),
             _keep_alive_direct_connect_reader: direct_connect_tx.subscribe(),
             direct_connect_sender: direct_connect_tx,
+            _router,
         };
 
         tokio::spawn({
