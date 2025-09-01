@@ -84,7 +84,7 @@ impl Tun {
 
 impl TunActor {
     async fn run(&mut self) -> Result<()> {
-        let mut dev_buf = [0u8; 1024*1024];
+        let mut dev_buf = Vec::with_capacity(1024*1024);
         loop {
             tokio::select! {
 
