@@ -93,6 +93,7 @@ impl TunActor {
                     action(self).await;
                 }
                 Ok(len) = self.dev.recv(&mut dev_buf) => {
+                    println!("tun_recv-size: {}", len);
                     if let Ok(ip_pkg) = Ipv4Pkg::new(&dev_buf[..len].to_vec()) {
                         let ip_pkg = ip_pkg.to_ipv4_packet().expect("this should have been validated during 'Ipv4Pkg::new' creation");
                         if matches!(
