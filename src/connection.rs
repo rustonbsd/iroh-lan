@@ -55,20 +55,20 @@ impl Actor for ConnActor {
                 stream_recv = self.recv_stream.read_u32_le() => {
                     if let Ok(frame_size) = stream_recv {
                         let _res = self.remote_read_next(frame_size).await;
-                        println!("self.recv_stream.read_u32_le(): {}", _res.is_ok())
+                        //println!("self.recv_stream.read_u32_le(): {}", _res.is_ok())
                     }
                 }
                 _ = self.sender_notify.notified() => {
                     let _res = self.remote_write_next().await;
-                    println!("self.remote_write_next().await: {}", _res.is_ok());
+                    //println!("self.remote_write_next().await: {}", _res.is_ok());
                 }
                 _ = self.receiver_notify.notified() => {
                     if let Some(msg) = self.receiver_queue.back() {
                         if self.external_sender.send(msg.clone()).is_err() {
-                            println!("self.external_sender.send() CLOSED");
+                            //println!("self.external_sender.send() CLOSED");
                             return Err(anyhow::anyhow!("external sender closed"));
                         }
-                        println!("self.receiver_notify.notified()");
+                        //println!("self.receiver_notify.notified()");
                         let _ = self.receiver_queue.pop_back();
                     }
                 }
