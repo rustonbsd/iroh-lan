@@ -163,7 +163,7 @@ impl ConnActor {
         let now = tokio::time::Instant::now().elapsed().as_secs();
 
         if !self.last_reconnect == 0 && self.last_reconnect + self.reconnect_backoff > now {
-            tokio::time::sleep(Duration::from_secs((self.last_reconnect + self.reconnect_backoff) - now)).await;
+            tokio::time::sleep(Duration::from_secs(self.reconnect_backoff - (now - self.last_reconnect))).await;
             self.reconnect_backoff += 1;
         }
 
