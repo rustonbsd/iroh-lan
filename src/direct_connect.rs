@@ -52,9 +52,9 @@ impl Direct {
     }
 
     pub async fn route_packet(&self, to: NodeId, pkg: DirectMessage) -> Result<()> {
-        self.api
-            .call(move |actor| Box::pin(actor.route_packet(to, pkg)))
-            .await
+        self.api.cast(move |actor| Box::pin(async move {if let Err(e) = actor.route_packet(to, pkg).await {
+            eprintln!("Error routing packet to {}: {:?}", to, e);
+        }})).await
     }
 }
 

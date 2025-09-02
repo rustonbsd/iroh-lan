@@ -107,7 +107,7 @@ impl Conn {
     }
 
     pub async fn write(&self, pkg: DirectMessage) -> Result<()> {
-        self.api.call(move |actor| Box::pin(actor.write(pkg))).await
+        self.api.cast(move |actor| Box::pin(actor.write(pkg))).await
     }
 
     pub async fn incoming_connection(&self, conn: Connection) -> Result<()> {
@@ -144,10 +144,9 @@ impl ConnActor {
         })
     }
 
-    pub async fn write(&mut self, pkg: DirectMessage) -> Result<()> {
+    pub async fn write(&mut self, pkg: DirectMessage) {
         let _ = self.sender_queue.push_front(pkg);
         self.sender_notify.notify_one();
-        Ok(())
     }
 
     pub async fn incoming_connection(&mut self, conn: Connection) -> Result<()> {
