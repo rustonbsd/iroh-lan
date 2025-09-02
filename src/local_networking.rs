@@ -106,7 +106,7 @@ impl TunActor {
                             if ip_pkg.get_destination() == self.ip {
                                 let _ = self.dev.send(ip_pkg.packet()).await;
                             } else {
-                                let _ = self.to_remote_writer.send(ip_pkg.into()).await;
+                                let _ = self.to_remote_writer.try_send(ip_pkg.into());
                             }
 
                             /*println!(

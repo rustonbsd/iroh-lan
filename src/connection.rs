@@ -192,21 +192,24 @@ impl ConnActor {
     }
 
     async fn remote_write_next(&mut self) -> Result<()> {
-        if let Some(msg) = self.sender_queue.back() {
-            match msg {
-                DirectMessage::IpPacket(_) => {
-                    let bytes = postcard::to_stdvec(msg)?;
-                    self.send_stream.write_u32_le(bytes.len() as u32).await?;
-                    self.send_stream.write(bytes.as_slice()).await?;
-                    let _ = self.sender_queue.pop_back();
-                    Ok(())
-                }
-                #[allow(unreachable_patterns)]
-                _ => Err(anyhow::anyhow!("unsupported message type")),
+        let mut wrote = 0;
+        while let Some(msg) = self.sender_queue.back() {
+            let bytes = postcard::to_stdvec(msg)?;
+            self.send_stream.write_u32_le(bytes.len() as u32).await?;
+            self.send_stream.write(bytes.as_slice()).await?;
+            let _ = self.sender_queue.pop_back();
+            wrote += 1;
+            if wrote >= 256 {
+                break;
             }
-        } else {
-            Err(anyhow::anyhow!("no message in queue"))
         }
+
+        if !self.sender_queue.is_empty() {
+            self.sender_notify.notify_one();
+        }
+
+        println!("write_remote: {wrote}");
+        Ok(())
     }
 
     async fn remote_read_next(&mut self, frame_len: u32) -> Result<DirectMessage> {
