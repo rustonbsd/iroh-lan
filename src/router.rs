@@ -198,7 +198,7 @@ impl Builder {
 
         if !self.creator_mode {
             sleep(Duration::from_secs(5)).await;
-            let data = serde_json::to_vec(&RouterMessage::ReqMessage(ReqMessage {
+            let data = postcard::to_stdvec(&RouterMessage::ReqMessage(ReqMessage {
                 node_id: endpoint.node_id(),
             }))?;
             router.gossip_sender.broadcast(data).await?;
@@ -228,7 +228,7 @@ impl Router {
         while let Some(Ok(event)) = self.gossip_receiver.next().await {
             if let iroh_gossip::api::Event::Received(message) = event {
                 if let Ok(router_msg) =
-                    serde_json::from_slice::<RouterMessage>(message.content.to_vec().as_slice())
+                    postcard::from_bytes(message.content.to_vec().as_slice())
                 {
                     match router_msg {
                         RouterMessage::StateMessage(state_message) => {
@@ -268,7 +268,7 @@ impl Router {
                                                                 as i64,
                                                             leader: state.leader,
                                                         });
-                                                    let data = serde_json::to_vec(&msg)
+                                                    let data = postcard::to_stdvec(&msg)
                                                         .expect("serialization failed");
                                                     let _ =
                                                         self.gossip_sender.broadcast(data).await;

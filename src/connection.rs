@@ -5,7 +5,7 @@ use crate::{
     actor::{Action, Actor, Handle},
 };
 use anyhow::Result;
-use iroh::endpoint::Connection;
+use iroh::{endpoint::Connection, NodeId};
 use iroh::{
     Endpoint,
     endpoint::{RecvStream, SendStream},
@@ -25,6 +25,7 @@ struct ConnActor {
     rx: tokio::sync::mpsc::Receiver<Action<ConnActor>>,
 
     conn: Connection,
+    conn_node_id: NodeId,
     send_stream: SendStream,
     recv_stream: RecvStream,
     endpoint: Endpoint,
@@ -95,6 +96,7 @@ impl Conn {
             rx,
             external_sender,
             endpoint,
+            conn.remote_node_id()?,
             conn,
             send_stream,
             recv_stream,
@@ -120,6 +122,7 @@ impl ConnActor {
         rx: tokio::sync::mpsc::Receiver<Action<ConnActor>>,
         external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
         endpoint: Endpoint,
+        conn_node_id: NodeId,
         conn: iroh::endpoint::Connection,
         send_stream: SendStream,
         recv_stream: RecvStream,
@@ -137,6 +140,7 @@ impl ConnActor {
             sender_notify: tokio::sync::Notify::new(),
             last_reconnect: 0,
             reconnect_backoff: 0,
+            conn_node_id,
         })
     }
 
@@ -156,6 +160,9 @@ impl ConnActor {
             anyhow::bail!("connection closed")
         }
 
+        // SHOULD NOT CHANGE but just for sanity
+        self.conn_node_id = self.conn.remote_node_id()?;
+
         Ok(())
     }
 
@@ -174,7 +181,7 @@ impl ConnActor {
         }
         let conn = self
             .endpoint
-            .connect(self.endpoint.node_id(), crate::Direct::ALPN)
+            .connect(self.conn_node_id, crate::Direct::ALPN)
             .await?;
         let (send_stream, recv_stream) = conn.open_bi().await?;
         self.send_stream = send_stream;
@@ -188,7 +195,7 @@ impl ConnActor {
         if let Some(msg) = self.sender_queue.back() {
             match msg {
                 DirectMessage::IpPacket(_) => {
-                    let bytes = serde_json::to_vec(msg)?;
+                    let bytes = postcard::to_stdvec(msg)?;
                     self.send_stream.write_u32_le(bytes.len() as u32).await?;
                     self.send_stream.write(bytes.as_slice()).await?;
                     let _ = self.sender_queue.pop_back();
@@ -206,7 +213,7 @@ impl ConnActor {
         let mut buf = vec![0; frame_len as usize];
         self.recv_stream.read_exact(&mut buf).await?;
 
-        if let Ok(pkg) = serde_json::from_slice::<DirectMessage>(&buf) {
+        if let Ok(pkg) = postcard::from_bytes(&buf) {
             match pkg {
                 DirectMessage::IpPacket(ip_pkg) => {
                     if let Ok(ip_pkg) = ip_pkg.to_ipv4_packet() {
