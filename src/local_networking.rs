@@ -59,7 +59,7 @@ impl Tun {
             // .name("feth0")
             .ipv4(ip, 24, None)
             .layer(Layer::L3)
-            .mtu(1400)
+            .mtu(1280)
             .build_async()?;
 
         let (api, rx) = Handle::<TunActor>::channel(1024);

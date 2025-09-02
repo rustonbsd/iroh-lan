@@ -46,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
                         println!("[ERROR] failed to route packet to {:?}", remote_node_id);
                         println!("Reason: {:?}", err);
                     } else {
+                        println!("roouted packets")
                         //println!("Routed packet to {:?}", remote_node_id);
                     }
                 }
