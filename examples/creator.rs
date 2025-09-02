@@ -34,39 +34,6 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let mut direct_rx = router.subscribe_direct_connect();
 
-    /*
-    tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind("172.22.0.2:8000")
-            .await
-            .unwrap();
-        while let Ok((mut stream, addr)) = listener.accept().await {
-            println!("Accepted connection from {}", addr);
-            tokio::spawn(async move {
-                
-                let (mut reader, mut writer) = stream.split();
-
-                while let Ok(frame_size) = reader.read_u32_le().await {
-                    if frame_size == 0 {
-                        println!("Connection closed by peer due to frame size == 0");
-                        break;
-                    }
-                    let mut buf = Vec::with_capacity(frame_size as usize);
-                    if reader.read(buf.as_mut_slice()).await.is_err() {
-                        println!("failed to read from stream, closing");
-                        break;
-                    }
-                    let _ = writer.write_u32_le(frame_size).await;
-                    if writer.write(buf.as_slice()).await.is_err() {
-                        println!("failed to write to stream, closing");
-                        break;
-                    }
-                    println!("echoed {} bytes to {}", frame_size, addr);
-                }
-            });
-        }
-    });
-    */
-
     println!("My IP: {}", my_ip);
 
     loop {

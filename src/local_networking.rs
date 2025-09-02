@@ -9,32 +9,32 @@ use crate::actor::{Action, Handle};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Ipv4Pkg(Vec<u8>);
 
-impl From<Ipv4Packet<'static>> for Ipv4Pkg {
-    fn from(value: Ipv4Packet<'static>) -> Self {
+impl<'a> From<Ipv4Packet<'a>> for Ipv4Pkg {
+    fn from(value: Ipv4Packet<'a>) -> Self {
         Ipv4Pkg(value.packet().to_vec())
-    }
-}
-
-impl TryFrom<Ipv4Pkg> for Ipv4Packet<'static> {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Ipv4Pkg) -> Result<Self> {
-        let slice = value.0.into_boxed_slice();
-        Ipv4Packet::new(Box::leak(slice))
-            .ok_or_else(|| anyhow::anyhow!("Invalid IPv4 packet"))
     }
 }
 
 
 impl Ipv4Pkg {
-    pub fn new(buf: &Vec<u8>) -> Result<Self> {
-        let pkg = Ipv4Pkg(buf.clone());
-        pkg.to_ipv4_packet()?; // validate
+    
+    // Accept anything that can be viewed as a byte slice.
+    pub fn new<B: AsRef<[u8]>>(buf: B) -> Result<Self> {
+        let v = buf.as_ref().to_vec();
+        let pkg = Ipv4Pkg(v);
+        // validate
+        pkg.to_ipv4_packet()?;
         Ok(pkg)
     }
 
-    pub fn to_ipv4_packet(&self) -> Result<Ipv4Packet<'static>> {
-        self.clone().try_into()
+    // Borrowing view over the internal bytes.
+    pub fn to_ipv4_packet(&self) -> Result<Ipv4Packet<'_>> {
+        Ipv4Packet::new(&self.0)
+            .ok_or_else(|| anyhow::anyhow!("Invalid IPv4 packet"))
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
     }
 }
 

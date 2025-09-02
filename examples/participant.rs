@@ -36,52 +36,6 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let mut direct_rx = router.subscribe_direct_connect();
 
-    /*
-    tokio::spawn(async move {
-        sleep(Duration::from_secs(10)).await;
-        println!("Connecting to echo server...");
-        let local: std::net::SocketAddr = "172.22.0.3:0".parse().unwrap();
-        let remote: std::net::SocketAddr = "172.22.0.2:8000".parse().unwrap();
-        let socket = tokio::net::TcpSocket::new_v4().unwrap();
-        socket.bind(local).unwrap();
-        let mut tcp_stream = socket.connect(remote).await.unwrap();
-        //let mut tcp_stream = TcpStream::connect(remote).unwrap();
-        println!("Connected to echo server, local addr: {}", tcp_stream.local_addr().unwrap());
-        println!(
-            "Connected from {} to {}",
-            tcp_stream.local_addr().unwrap(),
-            tcp_stream.peer_addr().unwrap()
-        );
-
-        let (mut receiver, mut sender) = tcp_stream.split();
-        let _ =  sender.write_u32_le(8).await;
-        let buf = [222u8; 8];
-        let _ = sender.write(&buf).await;
-
-        while let Ok(frame_size) = receiver.read_u32_le().await {
-            if frame_size == 0 {
-                println!("Connection closed frame size == 0");
-                break;
-            }
-            
-            let mut buf = Vec::with_capacity(frame_size as usize);
-            if receiver.read(buf.as_mut_slice()).await.is_err() {
-                println!("failed to read from stream, closing");
-                break;
-            } else {
-                println!("read {} bytes from echo server", frame_size);
-            }
-            sleep(Duration::from_millis(1000)).await;
-            let _ = sender.write_u32_le(frame_size).await;
-            if sender.write(&buf).await.is_err() {
-                println!("failed to write to stream, closing");
-                break;
-            }
-            println!("echoed {} bytes to {}", frame_size, local);
-        }
-    });
-    */
-
     println!("My IP: {}", my_ip);
 
     loop {
