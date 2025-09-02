@@ -98,7 +98,7 @@ impl TunActor {
                         let ip_pkg = ip_pkg.to_ipv4_packet().expect("this should have been validated during 'Ipv4Pkg::new' creation");
                         if matches!(
                             ip_pkg.get_next_level_protocol(),
-                            IpNextHeaderProtocols::Tcp | IpNextHeaderProtocols::Udp
+                            IpNextHeaderProtocols::Tcp | IpNextHeaderProtocols::Udp | IpNextHeaderProtocols::Icmp
                         ) {
                             // if packet is ment for local ip: write
                             // if ment for ip of remote node: vpn -> write
