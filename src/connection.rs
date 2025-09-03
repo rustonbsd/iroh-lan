@@ -213,7 +213,9 @@ impl ConnActor {
 
     async fn remote_read_next(&mut self, frame_len: u32) -> Result<DirectMessage> {
         let mut buf = vec![0; frame_len as usize];
+        let timer = tokio::time::Instant::now().elapsed().as_millis();
         self.recv_stream.read_exact(&mut buf).await?;
+        println!("elapsed timer {}", tokio::time::Instant::now().elapsed().as_millis() - timer);
 
         if let Ok(pkg) = postcard::from_bytes(&buf) {
             match pkg {

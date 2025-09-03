@@ -1,7 +1,7 @@
-use std::net::Ipv4Addr;
 use anyhow::Result;
-use pnet_packet::{ip::IpNextHeaderProtocols, Packet, ipv4::Ipv4Packet};
+use pnet_packet::{Packet, ip::IpNextHeaderProtocols, ipv4::Ipv4Packet};
 use serde::{Deserialize, Serialize};
+use std::net::Ipv4Addr;
 use tun_rs::{AsyncDevice, DeviceBuilder, Layer};
 
 use crate::actor::{Action, Handle};
@@ -15,9 +15,7 @@ impl<'a> From<Ipv4Packet<'a>> for Ipv4Pkg {
     }
 }
 
-
 impl Ipv4Pkg {
-    
     // Accept anything that can be viewed as a byte slice.
     pub fn new<B: AsRef<[u8]>>(buf: B) -> Result<Self> {
         let v = buf.as_ref().to_vec();
@@ -29,8 +27,7 @@ impl Ipv4Pkg {
 
     // Borrowing view over the internal bytes.
     pub fn to_ipv4_packet(&self) -> Result<Ipv4Packet<'_>> {
-        Ipv4Packet::new(&self.0)
-            .ok_or_else(|| anyhow::anyhow!("Invalid IPv4 packet"))
+        Ipv4Packet::new(&self.0).ok_or_else(|| anyhow::anyhow!("Invalid IPv4 packet"))
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -78,13 +75,19 @@ impl Tun {
     }
 
     pub async fn write(&self, pkg: Ipv4Pkg) -> Result<()> {
-        self.api.call(move |actor| Box::pin(actor.write_to_tun(pkg))).await
+        self.api
+            .cast(move |actor| {
+                Box::pin(async move {
+                    let _ = actor.write_to_tun(pkg).await;
+                })
+            })
+            .await
     }
 }
 
 impl TunActor {
     async fn run(&mut self) -> Result<()> {
-        let mut dev_buf = [0u8; 1024*128];
+        let mut dev_buf = [0u8; 1024 * 128];
         loop {
             tokio::select! {
 
