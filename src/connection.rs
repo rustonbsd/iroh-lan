@@ -60,7 +60,12 @@ impl Actor for ConnActor {
                     }
                 }
                 _ = self.sender_notify.notified() => {
-                    let _res = self.remote_write_next().await;
+                    while self.sender_queue.len() > 0 {
+                        if self.remote_write_next().await.is_err() {
+                            let _ = self.try_reconnect().await;
+                            break;
+                        }
+                    }
                     //println!("self.remote_write_next().await: {}", _res.is_ok());
                 }
                 _ = self.receiver_notify.notified() => {
