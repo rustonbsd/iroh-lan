@@ -191,6 +191,7 @@ impl ConnActor {
     }
 
     async fn remote_write_next(&mut self) -> Result<()> {
+        let timer = tokio::time::Instant::now().elapsed().as_millis();
         let mut wrote = 0;
         while let Some(msg) = self.sender_queue.back() {
             let bytes = postcard::to_stdvec(msg)?;
@@ -207,7 +208,7 @@ impl ConnActor {
             self.sender_notify.notify_one();
         }
 
-        println!("write_remote: {wrote}");
+        println!("write_remote: {wrote}; elapsed: {}", tokio::time::Instant::now().elapsed().as_millis() - timer);
         Ok(())
     }
 
@@ -215,7 +216,7 @@ impl ConnActor {
         let mut buf = vec![0; frame_len as usize];
         let timer = tokio::time::Instant::now().elapsed().as_millis();
         self.recv_stream.read_exact(&mut buf).await?;
-        println!("elapsed timer {}", tokio::time::Instant::now().elapsed().as_millis() - timer);
+        //println!("elapsed timer {}", tokio::time::Instant::now().elapsed().as_millis() - timer);
 
         if let Ok(pkg) = postcard::from_bytes(&buf) {
             match pkg {
