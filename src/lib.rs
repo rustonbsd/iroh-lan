@@ -8,6 +8,18 @@ mod connection;
 pub mod actor;
 
 
+use std::time::SystemTime;
+
 pub use local_networking::Tun;
 pub use direct_connect::{Direct, DirectMessage};
 pub use router::Router;
+
+pub async fn timeit<F: AsyncFn() -> T, T>(f: F) -> T {
+  let start = SystemTime::now();
+  let result = f().await;
+  let start = SystemTime::now();
+  let end = SystemTime::now();
+  let duration = end.duration_since(start).unwrap();
+  println!("it took {} seconds", duration.as_secs());
+  result
+}

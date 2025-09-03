@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, time::Duration};
+use std::{collections::VecDeque, time::{Duration, SystemTime}};
 
 use crate::{
     DirectMessage,
@@ -191,7 +191,7 @@ impl ConnActor {
     }
 
     async fn remote_write_next(&mut self) -> Result<()> {
-        let timer = tokio::time::Instant::now().elapsed().as_millis();
+        let start = SystemTime::now();
         let mut wrote = 0;
         while let Some(msg) = self.sender_queue.back() {
             let bytes = postcard::to_stdvec(msg)?;
@@ -208,13 +208,16 @@ impl ConnActor {
             self.sender_notify.notify_one();
         }
 
-        println!("write_remote: {wrote}; elapsed: {}", tokio::time::Instant::now().elapsed().as_millis() - timer);
+        let end = SystemTime::now();
+        let duration = end.duration_since(start).unwrap();
+        println!("write_remote: {wrote}; elapsed: {}", duration.as_millis());
         Ok(())
     }
 
     async fn remote_read_next(&mut self, frame_len: u32) -> Result<DirectMessage> {
         let mut buf = vec![0; frame_len as usize];
-        let timer = tokio::time::Instant::now().elapsed().as_millis();
+        
+        let start = SystemTime::now();
         self.recv_stream.read_exact(&mut buf).await?;
         //println!("elapsed timer {}", tokio::time::Instant::now().elapsed().as_millis() - timer);
 
@@ -225,6 +228,9 @@ impl ConnActor {
                         let msg = DirectMessage::IpPacket(ip_pkg.into());
                         self.receiver_queue.push_front(msg.clone());
                         self.receiver_notify.notify_one();
+                        let end = SystemTime::now();
+                        let duration = end.duration_since(start).unwrap();
+                        println!("read_remote: elapsed: {}", duration.as_millis());
                         Ok(msg)
                     } else {
                         Err(anyhow::anyhow!("failed to convert to IPv4 packet"))
