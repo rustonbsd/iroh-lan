@@ -135,8 +135,8 @@ impl TunActor {
     // validated write
     pub async fn write_to_tun(&self, pkg: Ipv4Pkg) -> Result<()> {
         let data = pkg.to_ipv4_packet()?.packet().to_vec();
-        let l = self.dev.send(&data).await?;
-        println!("tun_send-size: {} {}", data.len(), l);
+        let _l = self.dev.send(&data).await?;
+        //println!("tun_send-size: {} {}", data.len(), _l);
         Ok(())
     }
 }
