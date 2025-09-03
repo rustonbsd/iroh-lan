@@ -195,7 +195,7 @@ impl ConnActor {
         while let Some(msg) = self.sender_queue.back() {
             let bytes = postcard::to_stdvec(msg)?;
             self.send_stream.write_u32_le(bytes.len() as u32).await?;
-            self.send_stream.write(bytes.as_slice()).await?;
+            self.send_stream.write_all(bytes.as_slice()).await?;
             let _ = self.sender_queue.pop_back();
             wrote += 1;
             if wrote >= 256 {

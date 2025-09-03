@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
                 match direct_msg {
                     DirectMessage::IpPacket(ip_pkg) => {
                         //println!("WRITE TUN: {:?}", ip_pkg.to_ipv4_packet()?.get_destination());
-                        println!("remote reader subs: {}",remote_reader.len());
+                        println!("remote reader subs: {}",remote_reader.capacity());
                         tun.write(ip_pkg).await?;
                     }
                 }
