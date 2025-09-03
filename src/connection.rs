@@ -69,7 +69,7 @@ impl Actor for ConnActor {
                     //println!("self.remote_write_next().await: {}", _res.is_ok());
                 }
                 _ = self.receiver_notify.notified() => {
-                    if let Some(msg) = self.receiver_queue.back() {
+                    while let Some(msg) = self.receiver_queue.back() {
                         if self.external_sender.send(msg.clone()).is_err() {
                             //println!("self.external_sender.send() CLOSED");
                             return Err(anyhow::anyhow!("external sender closed"));
