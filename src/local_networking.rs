@@ -107,8 +107,9 @@ impl TunActor {
                                 println!("injected in local tun");
                                 let _ = self.dev.send(ip_pkg.packet()).await;
                             } else {
-                                println!("forwarding_to_remote_writer");
-                                let _ = self.to_remote_writer.try_send(ip_pkg.into());
+                                let res = self.to_remote_writer.try_send(ip_pkg.into());
+
+                                println!("forwarding_to_remote_writer {}", res.is_ok());
                             }
 
                             /*println!(
