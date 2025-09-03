@@ -44,14 +44,23 @@ struct ConnActor {
 
 impl Actor for ConnActor {
     async fn run(&mut self) -> Result<()> {
+        let mut reconnect_count = 0;
         loop {
             tokio::select! {
                 Some(action) = self.rx.recv() => {
                     action(self).await;
                 }
                 _ = self.send_stream.stopped() => {
-                    println!("Send stream stopped");
-                    let _ = self.try_reconnect().await;
+                    if reconnect_count < 5 {
+                        println!("Send stream stopped");
+                        if self.try_reconnect().await.is_err() {
+                            reconnect_count += 1;
+                        } else {
+                            reconnect_count = 0;
+                        }
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    }
                 }
                 stream_recv = self.recv_stream.read_u32_le() => {
                     if let Ok(frame_size) = stream_recv {
@@ -175,7 +184,7 @@ impl ConnActor {
 
         if self.last_reconnect != 0 && self.last_reconnect + self.reconnect_backoff > now {
             tokio::time::sleep(Duration::from_secs(self.reconnect_backoff - (now - self.last_reconnect))).await;
-            self.reconnect_backoff += 1;
+            self.reconnect_backoff *= 3;
         }
 
         self.last_reconnect = tokio::time::Instant::now().elapsed().as_secs();
@@ -215,7 +224,7 @@ impl ConnActor {
 
         let end = SystemTime::now();
         let duration = end.duration_since(start).unwrap();
-        println!("write_remote: {wrote}; elapsed: {}", duration.as_millis());
+        //println!("write_remote: {wrote}; elapsed: {}", duration.as_millis());
         Ok(())
     }
 
@@ -235,7 +244,7 @@ impl ConnActor {
                         self.receiver_notify.notify_one();
                         let end = SystemTime::now();
                         let duration = end.duration_since(start).unwrap();
-                        println!("read_remote: elapsed: {}", duration.as_millis());
+                        //println!("read_remote: elapsed: {}", duration.as_millis());
                         Ok(msg)
                     } else {
                         Err(anyhow::anyhow!("failed to convert to IPv4 packet"))

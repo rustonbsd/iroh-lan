@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
                         println!("[ERROR] failed to route packet to {:?}", remote_node_id);
                         println!("Reason: {:?}", err);
                     } else {
-                        println!("roouted packets")
+                        //println!("roouted packets")
                         //println!("Routed packet to {:?}", remote_node_id);
                     }
                 }
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
                 match direct_msg {
                     DirectMessage::IpPacket(ip_pkg) => {
                         //println!("WRITE TUN: {:?}", ip_pkg.to_ipv4_packet()?.get_destination());
-                        println!("remote reader subs: {}",remote_reader.capacity());
+                        //println!("remote reader subs: {}",remote_reader.capacity());
                         tun.write(ip_pkg).await?;
                     }
                 }

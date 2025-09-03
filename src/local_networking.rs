@@ -107,12 +107,12 @@ impl TunActor {
                             // if ment for ip of remote node: vpn -> write
 
                             if ip_pkg.get_destination() == self.ip {
-                                println!("injected in local tun");
+                                //println!("injected in local tun");
                                 let _ = self.dev.send(ip_pkg.packet()).await;
                             } else {
                                 let res = self.to_remote_writer.try_send(ip_pkg.into());
 
-                                println!("forwarding_to_remote_writer {}", res.is_ok());
+                               //println!("forwarding_to_remote_writer {}", res.is_ok());
                             }
 
                             /*println!(
