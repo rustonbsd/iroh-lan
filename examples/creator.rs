@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
 
     let my_ip = router.node_id_to_ip(router.node_id()).await?;
 
-    let (remote_writer, mut remote_reader) = tokio::sync::mpsc::channel(1024);
+    let (remote_writer, mut remote_reader) = tokio::sync::mpsc::channel(1024*16);
     let tun = iroh_lan::Tun::new(
         (my_ip.octets()[2], my_ip.octets()[3]),
         remote_writer,

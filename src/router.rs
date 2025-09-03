@@ -122,7 +122,7 @@ impl Builder {
             .membership_config(gossip_config)
             .spawn(endpoint.clone());
 
-        let (direct_connect_tx, _direct_connect_rx) = tokio::sync::broadcast::channel(1024);
+        let (direct_connect_tx, _direct_connect_rx) = tokio::sync::broadcast::channel(1024*16);
         let direct = Direct::new(endpoint.clone(), direct_connect_tx.clone());
 
         let _router = iroh::protocol::Router::builder(endpoint.clone())
@@ -152,7 +152,7 @@ impl Builder {
 
         let (gossip_sender, gossip_receiver) = topic.split().await?;
 
-        let (router_state_sender, router_state_reader) = tokio::sync::mpsc::channel(1024);
+        let (router_state_sender, router_state_reader) = tokio::sync::mpsc::channel(1024*16);
 
         let router_state_hs = if self.creator_mode {
             let mut hs = HashMap::<NodeId, Ipv4Addr>::new();

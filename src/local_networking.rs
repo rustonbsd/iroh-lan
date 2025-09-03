@@ -59,7 +59,7 @@ impl Tun {
             .mtu(1280)
             .build_async()?;
 
-        let (api, rx) = Handle::<TunActor>::channel(1024);
+        let (api, rx) = Handle::<TunActor>::channel(1024*16);
 
         tokio::spawn(async move {
             let mut actor = TunActor {

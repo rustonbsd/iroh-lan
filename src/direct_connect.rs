@@ -34,7 +34,7 @@ impl Direct {
         endpoint: iroh::endpoint::Endpoint,
         direct_connect_tx: tokio::sync::broadcast::Sender<DirectMessage>,
     ) -> Self {
-        let (api, rx) = Handle::<DirectActor>::channel(1024);
+        let (api, rx) = Handle::<DirectActor>::channel(1024*16);
         let mut actor = DirectActor {
             peers: HashMap::new(),
             endpoint,
