@@ -27,6 +27,7 @@ pub async fn run(name: &str, password: &str, creator_mode: bool) -> anyhow::Resu
         let mut direct_rx = router.subscribe_direct_connect();
         let tun = router.tun.clone().expect("tun device not set").clone();
         let mut remote_reader = tun.subscribe().await.expect("subscribe to work");
+        println!("Started standalone router event loop");
         loop {
             tokio::select! {
                 Ok(tun_recv) = remote_reader.recv() => {
@@ -42,6 +43,8 @@ pub async fn run(name: &str, password: &str, creator_mode: bool) -> anyhow::Resu
                             }});
                             println!("[ERROR] failed to route packet to {:?}", remote_node_id);
                             println!("Reason: {:?}", err);
+                        } else {
+                            println!("Routed packet to {:?}", remote_node_id);
                         }
                     }
                 }
