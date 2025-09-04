@@ -76,8 +76,8 @@ export default function App() {
 
   useEffect(() => { if (view === ViewState.Network) fetchPeers(); }, [peerRefreshTick, view, fetchPeers]);
 
-  const disconnect = async () => {
-    await invoke("disconnect");
+  const close = async () => {
+    await invoke("close");
     setPeers([]);
     setMyInfo(null);
     setView(ViewState.Lobby);
@@ -116,7 +116,7 @@ export default function App() {
                 </div>
                 <span className="opacity-50">ID {myInfo.node_id.slice(0, 18)}… {myInfo.leader && <span className="text-primary">(leader)</span>}</span>
               </div>
-              <Button variant="outline" size="sm" onClick={disconnect}>Disconnect</Button>
+              <Button variant="outline" size="sm" onClick={close}>Close</Button>
             </div>
           )}
         </header>

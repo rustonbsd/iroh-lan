@@ -96,9 +96,12 @@ async fn list_peers() -> Result<Vec<PeerInfo>, String> {
 }
 
 #[tauri::command]
-async fn disconnect() -> Result<(), String> {
+async fn close() -> Result<(), String> {
     let mut guard = ROUTER.lock().await;
     *guard = None; // drop
+    std::process::exit(0);
+
+    #[allow(unreachable_code)]
     Ok(())
 }
 
@@ -124,7 +127,7 @@ pub fn run() {
             join_network,
             my_info,
             list_peers,
-            disconnect,
+            close,
             kick_peer
         ])
         .run(tauri::generate_context!())

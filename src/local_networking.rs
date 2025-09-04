@@ -1,7 +1,7 @@
 use anyhow::Result;
 use pnet_packet::{Packet, ip::IpNextHeaderProtocols, ipv4::Ipv4Packet};
 use serde::{Deserialize, Serialize};
-use std::net::Ipv4Addr;
+use std::{fmt::Debug, net::Ipv4Addr};
 use tun_rs::{AsyncDevice, DeviceBuilder, Layer};
 
 use crate::actor::{Action, Handle};
@@ -35,6 +35,7 @@ impl Ipv4Pkg {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Tun {
     api: Handle<TunActor>,
 }
@@ -43,13 +44,23 @@ struct TunActor {
     ip: Ipv4Addr,
     dev: AsyncDevice,
     rx: tokio::sync::mpsc::Receiver<Action<TunActor>>,
-    to_remote_writer: tokio::sync::mpsc::Sender<Ipv4Pkg>,
+    to_remote_writer: tokio::sync::broadcast::Sender<Ipv4Pkg>,
+    _keep_alive_to_remote_writer: tokio::sync::broadcast::Receiver<Ipv4Pkg>,
+}
+
+impl Debug for TunActor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TunActor")
+            .field("ip", &self.ip)
+            .field("dev", &"AsyncDevice")
+            .finish()
+    }
 }
 
 impl Tun {
     pub fn new(
         free_ip_ending: (u8, u8),
-        to_remote_writer: tokio::sync::mpsc::Sender<Ipv4Pkg>,
+        to_remote_writer: tokio::sync::broadcast::Sender<Ipv4Pkg>,
     ) -> Result<Self> {
         let ip = Ipv4Addr::new(172, 22, free_ip_ending.0, free_ip_ending.1);
         let dev = DeviceBuilder::new()
@@ -64,9 +75,10 @@ impl Tun {
         tokio::spawn(async move {
             let mut actor = TunActor {
                 ip,
-                to_remote_writer,
+                to_remote_writer: to_remote_writer.clone(),
                 dev,
                 rx,
+                _keep_alive_to_remote_writer: to_remote_writer.subscribe(),
             };
             let _ = actor.run().await;
         });
@@ -83,6 +95,22 @@ impl Tun {
             })
             .await
     }
+
+    pub async fn subscribe(&self) -> Result<tokio::sync::broadcast::Receiver<Ipv4Pkg>> {
+        self.api
+            .call(move |actor| Box::pin(actor.subscribe()))
+            .await
+    }
+
+    pub async fn close(&self) -> Result<()> {
+        self.api
+            .cast(move |actor| Box::pin(async move {
+                let _ = actor.close().await;
+            }))
+            .await;
+        Ok(())
+    }
+    
 }
 
 impl TunActor {
@@ -110,7 +138,7 @@ impl TunActor {
                                 //println!("injected in local tun");
                                 let _ = self.dev.send(ip_pkg.packet()).await;
                             } else {
-                                let res = self.to_remote_writer.try_send(ip_pkg.into());
+                                let _ = self.to_remote_writer.send(ip_pkg.into());
 
                                //println!("forwarding_to_remote_writer {}", res.is_ok());
                             }
@@ -137,6 +165,15 @@ impl TunActor {
         let data = pkg.to_ipv4_packet()?.packet().to_vec();
         let _l = self.dev.send(&data).await?;
         //println!("tun_send-size: {} {}", data.len(), _l);
+        Ok(())
+    }
+
+    pub async fn subscribe(&mut self) -> Result<tokio::sync::broadcast::Receiver<Ipv4Pkg>> {
+        Ok(self.to_remote_writer.subscribe())
+    }
+
+    pub async fn close(&mut self) -> Result<()> {
+        drop(&self.dev);
         Ok(())
     }
 }

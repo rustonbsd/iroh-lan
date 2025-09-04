@@ -24,28 +24,14 @@ pub async fn run(name: &str, password: &str, creator_mode: bool) -> anyhow::Resu
             .await?
     };
 
-    while router.my_ip().await.is_none() {
-        println!("Waiting to get an IP address...");
-        sleep(Duration::from_secs(1)).await;
-    }
-
-    let my_ip = router.my_ip().await.ok_or_else(|| anyhow::anyhow!("failed to get my IP"))?;
-    println!("My IP address is {}", my_ip);
-
-
-    let (remote_writer, mut remote_reader) = tokio::sync::mpsc::channel(1024*16);
-    let tun = crate::Tun::new(
-        (my_ip.octets()[2], my_ip.octets()[3]),
-        remote_writer,
-    )?;
-
     Ok((router.clone(),tokio::spawn(async move {
                
         let mut direct_rx = router.subscribe_direct_connect();
-
+        let tun = router.tun.clone().expect("tun device not set").clone();
+        let mut remote_reader = tun.subscribe().await.expect("subscribe to work");
         loop {
             tokio::select! {
-                Some(tun_recv) = remote_reader.recv() => {
+                Ok(tun_recv) = remote_reader.recv() => {
                     if let Ok(remote_node_id)  = router.ip_to_node_id(tun_recv.clone()).await {
                         if let Err(err) = router.direct.route_packet(remote_node_id, DirectMessage::IpPacket(tun_recv)).await {
                             println!("[ERROR] failed to route packet to {:?}", remote_node_id);
