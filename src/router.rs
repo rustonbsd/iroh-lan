@@ -192,7 +192,6 @@ impl Builder {
                 router_state.spawn(router_state_reader).await;
             }
         });
-        
 
         let mut router = Router {
             gossip_sender,
@@ -219,14 +218,14 @@ impl Builder {
             sleep(Duration::from_secs(1)).await;
         }
 
-        let my_ip = router.my_ip().await.ok_or_else(|| anyhow::anyhow!("failed to get my IP"))?;
+        let my_ip = router
+            .my_ip()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("failed to get my IP"))?;
         println!("My IP address is {}", my_ip);
 
-        let (remote_writer, _remote_reader) = tokio::sync::broadcast::channel(1024*16);
-        let tun = crate::Tun::new(
-            (my_ip.octets()[2], my_ip.octets()[3]),
-            remote_writer,
-        )?;
+        let (remote_writer, _remote_reader) = tokio::sync::broadcast::channel(1024 * 16);
+        let tun = crate::Tun::new((my_ip.octets()[2], my_ip.octets()[3]), remote_writer)?;
 
         router.set_tun(tun).await?;
 
@@ -325,8 +324,26 @@ impl Router {
                             }
                         }
                     }
-                } else {
-                    //println!("Failed to deserialize gossip message");
+                }
+            } else if let iroh_gossip::api::Event::NeighborDown(node_id) = event {
+                let mut state = self.get_state().await?;
+                if state.node_id_ip_dict.remove(&node_id).is_some() {
+                    let _ = self.set_node_id_ip_dict(state.node_id_ip_dict.clone()).await;
+                }
+                // send state packet if leader
+                if let Some(leader) = state.leader {
+                    if leader == self.node_id {
+                        let msg = RouterMessage::StateMessage(StateMessage {
+                            node_id_ip_dict: state.node_id_ip_dict,
+                            timestamp: SystemTime::now()
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .unwrap_or(Duration::from_secs(0))
+                                .as_secs() as i64,
+                            leader: state.leader,
+                        });
+                        let data = postcard::to_stdvec(&msg).expect("serialization failed");
+                        let _ = self.gossip_sender.broadcast(data).await;
+                    }
                 }
             }
         }
