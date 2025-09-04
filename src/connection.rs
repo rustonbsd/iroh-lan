@@ -1,18 +1,24 @@
-use std::{collections::VecDeque, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    collections::VecDeque,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
     DirectMessage,
     actor::{Action, Actor, Handle},
 };
 use anyhow::Result;
-use iroh::{endpoint::{Connection, VarInt}, NodeId};
 use iroh::{
     Endpoint,
     endpoint::{RecvStream, SendStream},
 };
+use iroh::{
+    NodeId,
+    endpoint::{Connection, VarInt},
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const QUEUE_SIZE: usize = 1024*16;
+const QUEUE_SIZE: usize = 1024 * 16;
 const MAX_RECONNECTS: u64 = 5;
 
 #[derive(Debug)]
@@ -24,6 +30,10 @@ pub struct Conn {
 struct ConnActor {
     rx: tokio::sync::mpsc::Receiver<Action<ConnActor>>,
 
+    // all of these need to be optionals so that we can create an empty
+    // shell of the actor and then fill in the values later so we don't wait
+    // forever in the main standalone loop for router events hanging on 
+    // route_packet failed
     conn: Connection,
     conn_node_id: NodeId,
     send_stream: SendStream,
@@ -64,7 +74,7 @@ impl Actor for ConnActor {
                         } else {
                             reconnect_count = 0;
                         }
-                    } else {                        
+                    } else {
                         break;
                     }
                 }
@@ -126,12 +136,26 @@ impl Conn {
         Ok(Self { api })
     }
 
+    pub async fn connect(
+        endpoint: Endpoint,
+        node_id: NodeId,
+        external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
+    ) -> Result<Self> {
+        let (api, rx) = Handle::<ConnActor>::channel(1024);
+        let mut actor = ConnActor::connect(rx, endpoint, node_id, external_sender).await?;
+        tokio::spawn(async move { actor.run().await });
+        Ok(Self { api })
+    }
+
     pub async fn close(&self) -> Result<()> {
         self.api.cast(move |actor| Box::pin(actor.close())).await
     }
 
     pub async fn actor_is_running(&self) -> bool {
-        self.api.call(move |actor| Box::pin(async { Ok(actor.actor_is_running().await) })).await.unwrap_or(false)
+        self.api
+            .call(move |actor| Box::pin(async { Ok(actor.actor_is_running().await) }))
+            .await
+            .unwrap_or(false)
     }
 
     pub async fn write(&self, pkg: DirectMessage) -> Result<()> {
@@ -173,9 +197,32 @@ impl ConnActor {
         })
     }
 
+    pub async fn connect(
+        rx: tokio::sync::mpsc::Receiver<Action<ConnActor>>,
+        endpoint: Endpoint,
+        node_id: NodeId,
+        external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
+    ) -> Result<Self> {
+        let conn = endpoint.connect(node_id, crate::Direct::ALPN).await?;
+        let (send_stream, recv_stream) = conn.open_bi().await?;
+        let s = Self::new(
+            rx,
+            external_sender,
+            endpoint,
+            conn.remote_node_id()?,
+            conn,
+            send_stream,
+            recv_stream,
+        )
+        .await?;
+
+        Ok(s)
+    }
+
     pub async fn close(&mut self) {
         self.external_closed = true;
-        self.conn.close(VarInt::from_u32(400), b"Connection closed by user");
+        self.conn
+            .close(VarInt::from_u32(400), b"Connection closed by user");
     }
 
     pub async fn actor_is_running(&self) -> bool {
@@ -207,7 +254,10 @@ impl ConnActor {
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
 
         if self.last_reconnect != 0 && now > self.last_reconnect + self.reconnect_backoff {
-            tokio::time::sleep(Duration::from_secs(self.reconnect_backoff - (now - self.last_reconnect))).await;
+            tokio::time::sleep(Duration::from_secs(
+                self.reconnect_backoff - (now - self.last_reconnect),
+            ))
+            .await;
             self.reconnect_backoff *= 3;
         }
 
@@ -255,7 +305,7 @@ impl ConnActor {
 
     async fn remote_read_next(&mut self, frame_len: u32) -> Result<DirectMessage> {
         let mut buf = vec![0; frame_len as usize];
-        
+
         let start = SystemTime::now();
         self.recv_stream.read_exact(&mut buf).await?;
         //println!("elapsed timer {}", tokio::time::Instant::now().elapsed().as_millis() - timer);
