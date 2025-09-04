@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use anyhow::{Context, Result, bail};
 use iroh::{Endpoint, SecretKey};
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
-use tokio::time::sleep;
+use tokio::{task::block_in_place, time::sleep};
 
 use crate::{Direct, DirectMessage, local_networking::Ipv4Pkg};
 
@@ -128,7 +128,7 @@ impl Builder {
             .membership_config(gossip_config)
             .spawn(endpoint.clone());
 
-        let (direct_connect_tx, _direct_connect_rx) = tokio::sync::broadcast::channel(1024*16);
+        let (direct_connect_tx, _direct_connect_rx) = tokio::sync::broadcast::channel(1024 * 16);
         let direct = Direct::new(endpoint.clone(), direct_connect_tx.clone());
 
         let _router = iroh::protocol::Router::builder(endpoint.clone())
@@ -137,7 +137,9 @@ impl Builder {
             .spawn();
 
         let topic_initials = format!("lanparty-{}", self.entry_name);
-        let secret_initials = format!("{topic_initials}-{}-secret",self.password).as_bytes().to_vec();
+        let secret_initials = format!("{topic_initials}-{}-secret", self.password)
+            .as_bytes()
+            .to_vec();
 
         let record_publisher = RecordPublisher::new(
             TopicId::new(topic_initials),
@@ -148,7 +150,7 @@ impl Builder {
         );
         let topic = if self.creator_mode {
             gossip
-                .subscribe_and_join_with_auto_discovery(record_publisher)
+                .subscribe_and_join_with_auto_discovery_no_wait(record_publisher)
                 .await?
         } else {
             gossip
@@ -158,7 +160,7 @@ impl Builder {
 
         let (gossip_sender, gossip_receiver) = topic.split().await?;
 
-        let (router_state_sender, router_state_reader) = tokio::sync::mpsc::channel(1024*16);
+        let (router_state_sender, router_state_reader) = tokio::sync::mpsc::channel(1024 * 16);
 
         let router_state_hs = if self.creator_mode {
             let mut hs = HashMap::<NodeId, Ipv4Addr>::new();
@@ -203,7 +205,7 @@ impl Builder {
         });
 
         if !self.creator_mode {
-            sleep(Duration::from_secs(5)).await;
+            sleep(Duration::from_millis(1000)).await;
             let data = postcard::to_stdvec(&RouterMessage::ReqMessage(ReqMessage {
                 node_id: endpoint.node_id(),
             }))?;
@@ -234,9 +236,7 @@ impl Router {
         println!("router.spawn");
         while let Some(Ok(event)) = self.gossip_receiver.next().await {
             if let iroh_gossip::api::Event::Received(message) = event {
-                if let Ok(router_msg) =
-                    postcard::from_bytes(message.content.to_vec().as_slice())
-                {
+                if let Ok(router_msg) = postcard::from_bytes(message.content.to_vec().as_slice()) {
                     match router_msg {
                         RouterMessage::StateMessage(state_message) => {
                             if let Ok(state) = self.get_state().await {
@@ -397,8 +397,26 @@ impl Router {
         self.direct_connect_sender.subscribe()
     }
 
-    pub fn node_id(&self) -> NodeId {
+    pub fn my_node_id(&self) -> NodeId {
         self.node_id
+    }
+
+    pub async fn my_ip(&self) -> Option<Ipv4Addr> {
+        if let Ok(ip) = self.node_id_to_ip(self.my_node_id()).await {
+            Some(ip)
+        } else {
+            if let Ok(data) = postcard::to_stdvec(&RouterMessage::ReqMessage(ReqMessage {
+                node_id: self.node_id,
+            })) {
+                let _ = self.gossip_sender.broadcast(data).await;
+            }
+            None
+        }
+    }
+
+    pub async fn get_leader(&self) -> Result<Option<NodeId>> {
+        let state = self.get_state().await?;
+        Ok(state.leader)
     }
 }
 
