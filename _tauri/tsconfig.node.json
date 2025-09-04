@@ -5,10 +5,10 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true,
-    "baseUrl": ".",
+    "baseUrl": "../ui",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["../ui/src/*"]
     }
   },
-  "include": ["vite.config.ts"]
+  "include": ["../ui/vite.config.ts"]
 }

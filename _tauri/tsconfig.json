@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
-    "baseUrl": ".",
+    "baseUrl": "../ui",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["../ui/src/*"]
     },
 
     "target": "ES2020",
@@ -25,6 +25,6 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"],
+  "include": ["../ui/src"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

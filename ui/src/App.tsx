@@ -1,20 +1,50 @@
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
+import reactLogo from "./assets/react.svg";
+import { invoke } from "@tauri-apps/api/core";
+import "./App.css";
+import { Button } from "./components/ui/button";
 
 function App() {
-  const [count, setCount] = useState(0);
+  const [greetMsg, setGreetMsg] = useState("");
+  const [name, setName] = useState("");
+
+  async function greet() {
+    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+    setGreetMsg(await invoke("greet", { name }));
+  }
+
   return (
-    <main className="h-screen flex items-center justify-center bg-background text-foreground">
-      <div className="space-y-4 text-center">
-        <h1 className="text-2xl font-semibold">Tauri + React + shadcn</h1>
-        <p>Count: {count}</p>
-        <div className="flex gap-3 justify-center">
-          <Button variant="outline" onClick={() => setCount((c) => c + 1)}>Increment</Button>
-          <Button variant="outline" onClick={() => setCount(0)}>
-            Reset Count
-          </Button>
-        </div>
+    <main className="container">
+      <h1>Welcome to Tauri + React</h1>
+
+      <div className="row">
+        <a href="https://vite.dev" target="_blank">
+          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
+        </a>
+        <a href="https://tauri.app" target="_blank">
+          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
+        </a>
+        <a href="https://react.dev" target="_blank">
+          <img src={reactLogo} className="logo react" alt="React logo" />
+        </a>
       </div>
+      <Button>Click on the Tauri, Vite, and React logos to learn more.</Button>
+
+      <form
+        className="row"
+        onSubmit={(e) => {
+          e.preventDefault();
+          greet();
+        }}
+      >
+        <input
+          id="greet-input"
+          onChange={(e) => setName(e.currentTarget.value)}
+          placeholder="Enter a name..."
+        />
+        <button type="submit">Greet</button>
+      </form>
+      <p>{greetMsg}</p>
     </main>
   );
 }
