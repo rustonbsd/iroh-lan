@@ -51,7 +51,6 @@ where
         rrx.await.map_err(|_| anyhow!("actor stopped"))?
     }
 
-    #[allow(dead_code)]
     pub async fn cast<F>(&self, f: F) -> anyhow::Result<()>
     where
         F: for<'a> FnOnce(&'a mut A) -> ActorFut<'a, ()> + Send + 'static,

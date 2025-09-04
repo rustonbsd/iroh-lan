@@ -32,6 +32,14 @@ pub async fn run(name: &str, password: &str, creator_mode: bool) -> anyhow::Resu
                 Ok(tun_recv) = remote_reader.recv() => {
                     if let Ok(remote_node_id)  = router.ip_to_node_id(tun_recv.clone()).await {
                         if let Err(err) = router.direct.route_packet(remote_node_id, DirectMessage::IpPacket(tun_recv)).await {
+                            tokio::spawn({
+                                let router = router.clone();
+                                async move {
+                                    println!("Creating new connection to peer {}", remote_node_id);
+                                    if let Ok(quic_conn) = router.direct.get_endpoint().await.connect(remote_node_id, crate::Direct::ALPN).await {
+                                        let _ = router.direct.handle_connection(quic_conn).await;
+                                    }
+                            }});
                             println!("[ERROR] failed to route packet to {:?}", remote_node_id);
                             println!("Reason: {:?}", err);
                         }

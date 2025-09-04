@@ -62,6 +62,10 @@ impl Direct {
             .cast(move |actor| Box::pin(async move { let _ = actor.kick_peer(node_id).await; }))
             .await
     }
+
+    pub async fn get_endpoint(&self) -> iroh::endpoint::Endpoint {
+        self.api.call(|actor| Box::pin(actor.get_endpoint())).await.unwrap()
+    }
 }
 
 impl DirectActor {
@@ -122,6 +126,7 @@ impl DirectActor {
                 entry.get().write(pkg).await?;
             }
             Entry::Vacant(entry) => {
+                /*
                 println!("Creating new connection to peer {}", to);
                 let quic_conn = self.endpoint.connect(to, Direct::ALPN).await?;
                 let (send_stream, recv_stream) = quic_conn.open_bi().await?;
@@ -137,10 +142,15 @@ impl DirectActor {
                 .await?;
                 conn.write(pkg).await?;
                 entry.insert(conn);
+                */
             }
         }
 
         Ok(())
+    }
+
+    pub async fn get_endpoint(&self) -> Result<iroh::endpoint::Endpoint> {
+        Ok(self.endpoint.clone())
     }
 }
 
