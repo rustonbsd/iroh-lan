@@ -2951,6 +2951,7 @@ dependencies = [
 name = "iroh-lan-ui"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "iroh",
  "iroh-lan",
  "once_cell",

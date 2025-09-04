@@ -5,15 +5,15 @@ use crate::{
     actor::{Action, Actor, Handle},
 };
 use anyhow::Result;
-use iroh::{endpoint::Connection, NodeId};
+use iroh::{endpoint::{Connection, ConnectionError, VarInt}, NodeId};
 use iroh::{
     Endpoint,
     endpoint::{RecvStream, SendStream},
 };
-use pnet_packet::Packet;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const QUEUE_SIZE: usize = 1024;
+const QUEUE_SIZE: usize = 1024*16;
+const MAX_RECONNECTS: u64 = 5;
 
 #[derive(Debug)]
 pub struct Conn {
@@ -32,6 +32,7 @@ struct ConnActor {
 
     last_reconnect: u64,
     reconnect_backoff: u64,
+    external_closed: bool,
 
     external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
 
@@ -51,10 +52,15 @@ impl Actor for ConnActor {
                     action(self).await;
                 }
                 _ = self.send_stream.stopped() => {
-                    if reconnect_count < 5 {
+                    if self.external_closed {
+                        println!("Connection closed by user, stopping actor");
+                        break;
+                    }
+                    if reconnect_count < MAX_RECONNECTS {
                         println!("Send stream stopped");
                         if self.try_reconnect().await.is_err() {
                             reconnect_count += 1;
+                            tokio::time::sleep(Duration::from_secs(1)).await;
                         } else {
                             reconnect_count = 0;
                         }
@@ -120,6 +126,14 @@ impl Conn {
         Ok(Self { api })
     }
 
+    pub async fn close(&self) -> Result<()> {
+        self.api.cast(move |actor| Box::pin(actor.close())).await
+    }
+
+    pub async fn actor_is_running(&self) -> bool {
+        self.api.call(move |actor| Box::pin(async { Ok(actor.actor_is_running().await) })).await.unwrap_or(false)
+    }
+
     pub async fn write(&self, pkg: DirectMessage) -> Result<()> {
         self.api.cast(move |actor| Box::pin(actor.write(pkg))).await
     }
@@ -155,7 +169,17 @@ impl ConnActor {
             last_reconnect: 0,
             reconnect_backoff: 0,
             conn_node_id,
+            external_closed: false,
         })
+    }
+
+    pub async fn close(&mut self) {
+        self.external_closed = true;
+        self.conn.close(VarInt::from_u32(400), b"Connection closed by user");
+    }
+
+    pub async fn actor_is_running(&self) -> bool {
+        self.reconnect_backoff >= MAX_RECONNECTS
     }
 
     pub async fn write(&mut self, pkg: DirectMessage) {
@@ -182,12 +206,13 @@ impl ConnActor {
     async fn try_reconnect(&mut self) -> Result<()> {
         let now = tokio::time::Instant::now().elapsed().as_secs();
 
-        if self.last_reconnect != 0 && self.last_reconnect + self.reconnect_backoff > now {
+        if self.last_reconnect != 0 && now > self.last_reconnect + self.reconnect_backoff {
             tokio::time::sleep(Duration::from_secs(self.reconnect_backoff - (now - self.last_reconnect))).await;
             self.reconnect_backoff *= 3;
         }
 
         self.last_reconnect = tokio::time::Instant::now().elapsed().as_secs();
+        println!("Last reconnect attempt was at {}", self.last_reconnect);
 
         if self.conn.close_reason().is_none() {
             return Ok(());

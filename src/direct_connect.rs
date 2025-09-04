@@ -56,6 +56,12 @@ impl Direct {
             eprintln!("Error routing packet to {}: {:?}", to, e);
         }})).await
     }
+
+    pub async fn kick_peer(&self, node_id: NodeId) -> Result<()> {
+        self.api
+            .cast(move |actor| Box::pin(async move { let _ = actor.kick_peer(node_id).await; }))
+            .await
+    }
 }
 
 impl DirectActor {
@@ -91,9 +97,28 @@ impl DirectActor {
         Ok(())
     }
 
+    async fn kick_peer(&mut self, node_id: NodeId) -> Result<()> {
+        match self.peers.entry(node_id) {
+            Entry::Occupied(entry) => {
+                let _ = entry.get().close().await.ok();
+                entry.remove();
+                Ok(())
+            }
+            Entry::Vacant(entry) => {
+                Ok(())
+            }
+        }
+    }
+
     async fn route_packet(&mut self, to: NodeId, pkg: DirectMessage) -> Result<()> {
         match self.peers.entry(to) {
             Entry::Occupied(entry) => {
+                if !entry.get().actor_is_running().await {
+                    entry.get().close().await.ok();
+                    println!("Connection to peer {} is not running, removing", to);
+                    entry.remove();
+                    return Err(anyhow::anyhow!("connection to peer is not running"));
+                }
                 entry.get().write(pkg).await?;
             }
             Entry::Vacant(entry) => {

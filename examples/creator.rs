@@ -21,11 +21,11 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .await?;
 
-    while router.node_id_to_ip(router.node_id()).await.is_err() {
+    while router.node_id_to_ip(router.my_node_id()).await.is_err() {
         sleep(Duration::from_secs(1)).await;
     }
 
-    let my_ip = router.node_id_to_ip(router.node_id()).await?;
+    let my_ip = router.node_id_to_ip(router.my_node_id()).await?;
 
     let (remote_writer, mut remote_reader) = tokio::sync::mpsc::channel(1024*16);
     let tun = iroh_lan::Tun::new(
