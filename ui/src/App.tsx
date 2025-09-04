@@ -96,10 +96,24 @@ export default function App() {
           </div>
           {view === ViewState.Network && myInfo && (
             <div className="flex items-center gap-4">
-              <div className="flex flex-col gap-0 text-[10px] font-mono leading-tight">
-                <span className="opacity-70">IP {myInfo.ip ?? "allocating…"}</span>
-                <span className="opacity-50">ID {myInfo.node_id.slice(0, 18)}…</span>
-                {myInfo.leader && <span className="text-primary">leader</span>}
+              <div className="flex flex-col gap-1 text-[10px] font-mono leading-tight">
+                <div className="flex items-center gap-1">
+                  <span className="opacity-70">IP {myInfo.ip ?? "allocating…"}</span>
+                  {myInfo.ip && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-5 px-2 text-[10px]"
+                      onClick={() => {
+                        navigator.clipboard.writeText(myInfo.ip!);
+                        toast.success("Copied IP");
+                      }}
+                    >
+                      copy
+                    </Button>
+                  )}
+                </div>
+                <span className="opacity-50">ID {myInfo.node_id.slice(0, 18)}… {myInfo.leader && <span className="text-primary">(leader)</span>}</span>
               </div>
               <Button variant="outline" size="sm" onClick={disconnect}>Disconnect</Button>
             </div>
@@ -150,9 +164,9 @@ export default function App() {
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead className="w-[160px]">IP</TableHead>
+                        <TableHead className="w-[180px]">IP</TableHead>
                         <TableHead>Node ID</TableHead>
-                        <TableHead className="w-[100px] text-right">Status</TableHead>
+                        <TableHead className="w-[180px] text-right">Actions / Status</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -163,10 +177,49 @@ export default function App() {
                       )}
                       {peers.map((p) => (
                         <TableRow key={p.node_id + p.ip}>
-                          <TableCell className="font-mono text-xs">{p.ip}</TableCell>
+                          <TableCell className="font-mono text-xs flex items-center gap-2">
+                            <span>{p.ip}</span>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-6 px-2 text-[10px]"
+                              onClick={() => {
+                                navigator.clipboard.writeText(p.ip);
+                                toast.success("Copied IP");
+                              }}
+                            >
+                              copy
+                            </Button>
+                          </TableCell>
                           <TableCell className="font-mono text-[10px] opacity-70">{p.node_id}</TableCell>
-                          <TableCell className="text-right">
-                            <Badge variant="outline" className={cn("text-[10px]", p.status === "Active" && "border-emerald-500/40 text-emerald-400 bg-emerald-500/10")}>{p.status}</Badge>
+                          <TableCell className="text-right flex items-center justify-end gap-2">
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                "text-[10px]",
+                                p.status === "Active" && "border-emerald-500/40 text-emerald-400 bg-emerald-500/10"
+                              )}
+                            >
+                              {p.status}
+                            </Badge>
+                            {myInfo && myInfo.leader && p.node_id !== myInfo.node_id && (
+                              <Button
+                                variant="destructive"
+                                size="sm"
+                                className="h-6 px-2 text-[10px]"
+                                onClick={async () => {
+                                  try {
+                                    await invoke("kick_peer", { nodeId: p.node_id });
+                                    toast.success("Kick signal sent");
+                                    fetchPeers();
+                                  } catch (e:any) {
+                                    toast.error(String(e));
+                                  }
+                                }}
+                              >
+                                kick
+                              </Button>
+                            )}
                           </TableCell>
                         </TableRow>
                       ))}

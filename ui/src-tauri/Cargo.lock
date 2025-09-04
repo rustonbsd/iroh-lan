@@ -2954,6 +2954,7 @@ dependencies = [
  "iroh",
  "iroh-lan",
  "once_cell",
+ "self-runas",
  "serde",
  "serde_json",
  "tauri",

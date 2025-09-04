@@ -118,6 +118,22 @@ async fn disconnect() -> Result<(), String> {
     Ok(())
 }
 
+// Kick (remove) a peer from the network. Placeholder: returns Err if router missing.
+// The actual logic should be implemented in the main crate (e.g., a Router::kick_peer(NodeId) method).
+#[tauri::command]
+async fn kick_peer(node_id: String) -> Result<(), String> {
+    let guard = ROUTER.lock().await;
+    if let Some(_router) = guard.as_ref() {
+        // TODO: wire into router once implemented. For now just Ok.
+        // Example future code (pseudo):
+        // let nid = node_id.parse::<iroh::NodeId>().map_err(|e| e.to_string())?;
+        // _router.kick_peer(nid).await.map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        Err("not_connected".into())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -127,7 +143,8 @@ pub fn run() {
             join_network,
             my_info,
             list_peers,
-            disconnect
+            disconnect,
+            kick_peer
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
