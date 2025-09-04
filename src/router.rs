@@ -84,6 +84,7 @@ pub struct Builder {
     entry_name: String,
     secret_key: SecretKey,
     creator_mode: bool,
+    password: String,
 }
 
 impl Builder {
@@ -103,6 +104,11 @@ impl Builder {
 
     pub fn creator_mode(mut self) -> Self {
         self.creator_mode = true;
+        self
+    }
+
+    pub fn password(mut self, password: &str) -> Self {
+        self.password = password.to_string();
         self
     }
 
@@ -131,7 +137,7 @@ impl Builder {
             .spawn();
 
         let topic_initials = format!("lanparty-{}", self.entry_name);
-        let secret_initials = format!("{topic_initials}-secret").as_bytes().to_vec();
+        let secret_initials = format!("{topic_initials}-{}-secret",self.password).as_bytes().to_vec();
 
         let record_publisher = RecordPublisher::new(
             TopicId::new(topic_initials),
@@ -214,6 +220,7 @@ impl Default for Builder {
             creator_mode: false,
             entry_name: String::default(),
             secret_key: SecretKey::generate(&mut rand::thread_rng()),
+            password: String::default(),
         }
     }
 }

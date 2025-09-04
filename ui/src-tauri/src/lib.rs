@@ -31,21 +31,27 @@ fn node_id_to_string(id: &iroh::NodeId) -> String {
 async fn create_network(name: String, _password: String) -> Result<MyInfo, String> {
     let mut guard = ROUTER.lock().await;
     *guard = None; // drop previous router (disconnect)
-    let builder = iroh_lan::Router::builder().entry_name(&name).creator_mode();
+
+    let builder = iroh_lan::Router::builder().entry_name(&name).creator_mode().password(&_password);
     let router = builder.build().await.map_err(|e| e.to_string())?;
     let my_id = router.node_id();
     let state = router.get_state().await.map_err(|e| e.to_string())?;
     let ip = state.node_id_ip_dict.get(&my_id).map(|ip| ip.to_string());
     let leader = state.leader.map(|l| l == my_id).unwrap_or(false);
     *guard = Some(router);
-    Ok(MyInfo { node_id: node_id_to_string(&my_id), ip, leader })
+    Ok(MyInfo {
+        node_id: node_id_to_string(&my_id),
+        ip,
+        leader,
+    })
 }
 
 #[tauri::command]
 async fn join_network(name: String, _password: String) -> Result<MyInfo, String> {
     let mut guard = ROUTER.lock().await;
     *guard = None; // drop previous router if any
-    let builder = iroh_lan::Router::builder().entry_name(&name);
+
+    let builder = iroh_lan::Router::builder().entry_name(&name).password(&_password);
     let router = builder.build().await.map_err(|e| e.to_string())?;
     let my_id = router.node_id();
     // Wait up to ~10s for leader to assign IP (poll every 1s)
@@ -55,11 +61,17 @@ async fn join_network(name: String, _password: String) -> Result<MyInfo, String>
         let state = router.get_state().await.map_err(|e| e.to_string())?;
         ip = state.node_id_ip_dict.get(&my_id).map(|ip| ip.to_string());
         leader = state.leader.map(|l| l == my_id).unwrap_or(false);
-        if ip.is_some() { break; }
+        if ip.is_some() {
+            break;
+        }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     *guard = Some(router);
-    Ok(MyInfo { node_id: node_id_to_string(&my_id), ip, leader })
+    Ok(MyInfo {
+        node_id: node_id_to_string(&my_id),
+        ip,
+        leader,
+    })
 }
 
 #[tauri::command]
@@ -70,7 +82,11 @@ async fn my_info() -> Result<MyInfo, String> {
         let state = router.get_state().await.map_err(|e| e.to_string())?;
         let ip = state.node_id_ip_dict.get(&my_id).map(|ip| ip.to_string());
         let leader = state.leader.map(|l| l == my_id).unwrap_or(false);
-        Ok(MyInfo { node_id: node_id_to_string(&my_id), ip, leader })
+        Ok(MyInfo {
+            node_id: node_id_to_string(&my_id),
+            ip,
+            leader,
+        })
     } else {
         Err("not_connected".into())
     }
@@ -106,7 +122,13 @@ async fn disconnect() -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![create_network, join_network, my_info, list_peers, disconnect])
+        .invoke_handler(tauri::generate_handler![
+            create_network,
+            join_network,
+            my_info,
+            list_peers,
+            disconnect
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
