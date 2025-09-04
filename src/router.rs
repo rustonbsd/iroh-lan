@@ -15,6 +15,7 @@ use anyhow::{Context, Result, bail};
 use iroh::{Endpoint, SecretKey};
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
 use tokio::{task::block_in_place, time::sleep};
+use tun_rs::AsyncDevice;
 
 use crate::{Direct, DirectMessage, local_networking::Ipv4Pkg};
 
@@ -28,6 +29,7 @@ pub struct Router {
     pub direct: Arc<Direct>,
     pub direct_connect_sender: tokio::sync::broadcast::Sender<DirectMessage>,
     pub _keep_alive_direct_connect_reader: tokio::sync::broadcast::Receiver<DirectMessage>,
+    pub tun: Option<crate::Tun>,
 }
 
 impl Clone for Router {
@@ -42,6 +44,7 @@ impl Clone for Router {
             direct: Arc::clone(&self.direct),
             direct_connect_sender: self.direct_connect_sender.clone(),
             _keep_alive_direct_connect_reader: self.direct_connect_sender.subscribe(),
+            tun: self.tun.clone(),
         }
     }
 }
@@ -85,6 +88,7 @@ pub struct Builder {
     secret_key: SecretKey,
     creator_mode: bool,
     password: String,
+    tun: Option<crate::Tun>,
 }
 
 impl Builder {
@@ -109,6 +113,11 @@ impl Builder {
 
     pub fn password(mut self, password: &str) -> Self {
         self.password = password.to_string();
+        self
+    }
+
+    pub fn tun(mut self, tun: crate::Tun) -> Self {
+        self.tun = Some(tun);
         self
     }
 
@@ -184,8 +193,9 @@ impl Builder {
                 router_state.spawn(router_state_reader).await;
             }
         });
+        
 
-        let router = Router {
+        let mut router = Router {
             gossip_sender,
             gossip_receiver,
             router_requester: router_state_sender,
@@ -195,6 +205,7 @@ impl Builder {
             _keep_alive_direct_connect_reader: direct_connect_tx.subscribe(),
             direct_connect_sender: direct_connect_tx,
             _router,
+            tun: None,
         };
 
         tokio::spawn({
@@ -203,6 +214,22 @@ impl Builder {
                 let _ = router.spawn().await;
             }
         });
+
+        while router.my_ip().await.is_none() {
+            println!("Waiting to get an IP address...");
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        let my_ip = router.my_ip().await.ok_or_else(|| anyhow::anyhow!("failed to get my IP"))?;
+        println!("My IP address is {}", my_ip);
+
+        let (remote_writer, _remote_reader) = tokio::sync::broadcast::channel(1024*16);
+        let tun = crate::Tun::new(
+            (my_ip.octets()[2], my_ip.octets()[3]),
+            remote_writer,
+        )?;
+
+        router.set_tun(tun).await?;
 
         if !self.creator_mode {
             sleep(Duration::from_millis(1000)).await;
@@ -223,6 +250,7 @@ impl Default for Builder {
             entry_name: String::default(),
             secret_key: SecretKey::generate(&mut rand::thread_rng()),
             password: String::default(),
+            tun: None,
         }
     }
 }
@@ -230,6 +258,15 @@ impl Default for Builder {
 impl Router {
     pub fn builder() -> Builder {
         Builder::new()
+    }
+
+    pub async fn close(self) -> Result<()> {
+        self.tun.context("failed to get tun device")?.close().await
+    }
+
+    pub async fn set_tun(&mut self, tun: crate::Tun) -> Result<()> {
+        self.tun = Some(tun);
+        Ok(())
     }
 
     async fn spawn(&self) -> Result<()> {
