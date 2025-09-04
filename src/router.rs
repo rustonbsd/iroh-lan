@@ -40,7 +40,7 @@ impl Clone for Router {
             _router: self._router.clone(),
             router_requester: self.router_requester.clone(),
             node_id: self.node_id.clone(),
-            _topic: None,
+            _topic: self._topic.clone(),
             direct: Arc::clone(&self.direct),
             direct_connect_sender: self.direct_connect_sender.clone(),
             _keep_alive_direct_connect_reader: self.direct_connect_sender.subscribe(),
