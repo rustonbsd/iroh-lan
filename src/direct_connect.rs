@@ -52,9 +52,7 @@ impl Direct {
     }
 
     pub async fn route_packet(&self, to: NodeId, pkg: DirectMessage) -> Result<()> {
-        self.api.cast(move |actor| Box::pin(async move {if let Err(e) = actor.route_packet(to, pkg).await {
-            eprintln!("Error routing packet to {}: {:?}", to, e);
-        }})).await
+        self.api.call(move |actor| Box::pin(actor.route_packet(to, pkg))).await
     }
 
     pub async fn kick_peer(&self, node_id: NodeId) -> Result<()> {
@@ -125,7 +123,8 @@ impl DirectActor {
                 }
                 entry.get().write(pkg).await?;
             }
-            Entry::Vacant(entry) => {
+            Entry::Vacant(_) => {
+                return Err(anyhow::anyhow!("no connection to peer"));
                 /*
                 println!("Creating new connection to peer {}", to);
                 let quic_conn = self.endpoint.connect(to, Direct::ALPN).await?;
