@@ -107,8 +107,7 @@ impl Tun {
             .cast(move |actor| Box::pin(async move {
                 let _ = actor.close().await;
             }))
-            .await;
-        Ok(())
+            .await
     }
     
 }
@@ -173,7 +172,7 @@ impl TunActor {
     }
 
     pub async fn close(&mut self) -> Result<()> {
-        drop(&self.dev);
+        let _ = &self.dev;
         Ok(())
     }
 }

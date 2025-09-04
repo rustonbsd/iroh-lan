@@ -1,11 +1,11 @@
-use std::{collections::VecDeque, time::{Duration, SystemTime}};
+use std::{collections::VecDeque, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 use crate::{
     DirectMessage,
     actor::{Action, Actor, Handle},
 };
 use anyhow::Result;
-use iroh::{endpoint::{Connection, ConnectionError, VarInt}, NodeId};
+use iroh::{endpoint::{Connection, VarInt}, NodeId};
 use iroh::{
     Endpoint,
     endpoint::{RecvStream, SendStream},
@@ -64,8 +64,8 @@ impl Actor for ConnActor {
                         } else {
                             reconnect_count = 0;
                         }
-                    } else {
-                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    } else {                        
+                        break;
                     }
                 }
                 stream_recv = self.recv_stream.read_u32_le() => {
@@ -98,7 +98,7 @@ impl Actor for ConnActor {
                 }
             }
         }
-
+        self.external_closed = true;
         Ok(())
     }
 }
@@ -204,14 +204,14 @@ impl ConnActor {
     }
 
     async fn try_reconnect(&mut self) -> Result<()> {
-        let now = tokio::time::Instant::now().elapsed().as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
 
         if self.last_reconnect != 0 && now > self.last_reconnect + self.reconnect_backoff {
             tokio::time::sleep(Duration::from_secs(self.reconnect_backoff - (now - self.last_reconnect))).await;
             self.reconnect_backoff *= 3;
         }
 
-        self.last_reconnect = tokio::time::Instant::now().elapsed().as_secs();
+        self.last_reconnect = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         println!("Last reconnect attempt was at {}", self.last_reconnect);
 
         if self.conn.close_reason().is_none() {
