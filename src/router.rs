@@ -14,8 +14,7 @@ use serde::{Deserialize, Serialize};
 use anyhow::{Context, Result, bail};
 use iroh::{Endpoint, SecretKey};
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
-use tokio::{task::block_in_place, time::sleep};
-use tun_rs::AsyncDevice;
+use tokio::time::sleep;
 
 use crate::{Direct, DirectMessage, local_networking::Ipv4Pkg};
 

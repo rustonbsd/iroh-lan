@@ -1,7 +1,5 @@
-use std::time::Duration;
-
 use iroh::SecretKey;
-use tokio::{task::JoinHandle, time::sleep};
+use tokio::task::JoinHandle;
 
 use crate::DirectMessage;
 

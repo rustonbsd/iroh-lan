@@ -104,7 +104,7 @@ impl DirectActor {
                 entry.remove();
                 Ok(())
             }
-            Entry::Vacant(entry) => {
+            Entry::Vacant(_) => {
                 Ok(())
             }
         }
