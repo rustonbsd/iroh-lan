@@ -179,7 +179,7 @@ impl ConnActor {
     }
 
     pub async fn actor_is_running(&self) -> bool {
-        self.reconnect_backoff >= MAX_RECONNECTS
+        self.reconnect_backoff < MAX_RECONNECTS
     }
 
     pub async fn write(&mut self, pkg: DirectMessage) {
