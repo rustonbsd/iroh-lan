@@ -114,7 +114,7 @@ impl Conn {
             let s = s.clone();
             async move {
                 if let Ok(conn) = endpoint.connect(node_id, crate::Direct::ALPN).await {
-                    let _ = s.incoming_connection(conn).await;
+                    let _ = s.incoming_connection(conn,false).await;
                 }
             }
         });
@@ -142,9 +142,9 @@ impl Conn {
         self.api.cast(move |actor| Box::pin(actor.write(pkg))).await
     }
 
-    pub async fn incoming_connection(&self, conn: Connection) -> Result<()> {
+    pub async fn incoming_connection(&self, conn: Connection, accept_not_open: bool) -> Result<()> {
         self.api
-            .call(move |actor| Box::pin(actor.incoming_connection(conn)))
+            .call(move |actor| Box::pin(actor.incoming_connection(conn, accept_not_open)))
             .await
     }
 }
@@ -166,8 +166,8 @@ impl Actor for ConnActor {
                         self.conn.as_ref().and_then(|c| c.close_reason()).is_some()
                     ) => {
                     if reconnect_count < MAX_RECONNECTS {
-                        println!("Send stream stopped");
                         if self.try_reconnect().await.is_err() {
+                            println!("Send stream stopped");
                             reconnect_count += 1;
                             tokio::time::sleep(Duration::from_secs(1)).await;
                         } else {
@@ -270,8 +270,12 @@ impl ConnActor {
         self.sender_notify.notify_one();
     }
 
-    pub async fn incoming_connection(&mut self, conn: Connection) -> Result<()> {
-        let (send_stream, recv_stream) = conn.accept_bi().await?;
+    pub async fn incoming_connection(&mut self, conn: Connection, accept_not_open: bool) -> Result<()> {
+        let (send_stream, recv_stream) = if accept_not_open {
+            conn.accept_bi().await?
+        } else {
+            conn.open_bi().await?
+        };
 
         if conn.close_reason().is_some() {
             self.state = ConnState::Closed;
@@ -282,6 +286,9 @@ impl ConnActor {
         self.send_stream = Some(send_stream);
         self.recv_stream = Some(recv_stream);
         self.state = ConnState::Open;
+        self.sender_notify.notify_one();
+        self.receiver_notify.notify_one();
+        self.reconnect_backoff = 1;
 
         // SHOULD NOT CHANGE but just for sanity
         self.conn_node_id = self.conn.clone().expect("new_conn").remote_node_id()?;
@@ -295,6 +302,7 @@ impl ConnActor {
         }
         if let Some(conn) = &mut self.conn {
             if conn.close_reason().is_none() {
+                println!("close reason ok state: {:?}", self.state);
                 return Ok(());
             }
         }
@@ -314,6 +322,8 @@ impl ConnActor {
                 self.conn = Some(conn);
                 self.reconnect_backoff = 1;
                 self.state = ConnState::Open;
+                self.sender_notify.notify_one();
+                self.receiver_notify.notify_one();
                 Ok(())
             } else {
                 self.state = ConnState::Disconnected;
