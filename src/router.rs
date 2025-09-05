@@ -509,7 +509,8 @@ impl Router {
             if let Ok(data) = postcard::to_stdvec(&RouterMessage::ReqMessage(ReqMessage {
                 node_id: self.node_id,
             })) {
-                let _ = self.gossip_sender.broadcast(data).await;
+                let res = self.gossip_sender.broadcast(data).await;
+                println!("Requested my IP address: {:?}", res);
             }
             None
         }
