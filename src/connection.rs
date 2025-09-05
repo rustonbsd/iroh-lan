@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    pin::Pin,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -8,9 +9,10 @@ use crate::{
     actor::{Action, Actor, Handle},
 };
 use anyhow::Result;
+use futures::FutureExt;
 use iroh::{
     Endpoint,
-    endpoint::{RecvStream, SendStream},
+    endpoint::{ClosedStream, RecvStream, SendStream, StoppedError},
 };
 use iroh::{
     NodeId,
@@ -156,9 +158,13 @@ impl Actor for ConnActor {
                 Some(action) = self.rx.recv() => {
                     action(self).await;
                 }
-                _ = self.send_stream.as_mut().expect("conditional failed").stopped(), if self.send_stream.is_some()
-                        && self.conn.is_some()
-                        && self.state != ConnState::Closed 
+                Ok(_) = async {
+                    if let Some(send) = &mut self.send_stream {
+                        send.priority()
+                    } else {
+                        futures::future::pending().await
+                    }
+                }, if self.state != ConnState::Closed
                         && now > self.last_reconnect + self.reconnect_backoff => {
                     if reconnect_count < MAX_RECONNECTS {
                         println!("Send stream stopped");
@@ -176,7 +182,10 @@ impl Actor for ConnActor {
                 stream_recv = async {
                     if let Some(recv) = &mut self.recv_stream {
                         recv.read_u32_le().await
-                    } else {futures::future::pending().await} }, if self.conn.is_some() && self.state != ConnState::Closed => {
+                    } else {
+                        futures::future::pending().await
+                    } 
+                }, if self.state != ConnState::Closed => {
                     if let Ok(frame_size) = stream_recv {
                         let _res = self.remote_read_next(frame_size).await;
                         //println!("self.recv_stream.read_u32_le(): {}", _res.is_ok())
@@ -297,11 +306,12 @@ impl ConnActor {
         self.state = ConnState::Connecting;
         self.reconnect_backoff *= 3;
         self.last_reconnect = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        
+
         if let Ok(conn) = self
             .endpoint
             .connect(self.conn_node_id, crate::Direct::ALPN)
-            .await {
+            .await
+        {
             if let Ok((send_stream, recv_stream)) = conn.open_bi().await {
                 self.send_stream = Some(send_stream);
                 self.recv_stream = Some(recv_stream);
@@ -313,7 +323,6 @@ impl ConnActor {
                 self.state = ConnState::Disconnected;
                 return Err(anyhow::anyhow!("failed to open streams"));
             }
-           
         } else {
             // Connecting state, will retry later
             return Err(anyhow::anyhow!("failed to connect"));
