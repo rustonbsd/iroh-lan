@@ -64,6 +64,10 @@ impl Direct {
     pub async fn get_endpoint(&self) -> iroh::endpoint::Endpoint {
         self.api.call(|actor| Box::pin(actor.get_endpoint())).await.unwrap()
     }
+
+    pub async fn close(&self) -> Result<()> {
+        self.api.call(|actor| Box::pin(actor.close())).await
+    }
 }
 
 impl DirectActor {
@@ -139,6 +143,13 @@ impl DirectActor {
 
     pub async fn get_endpoint(&self) -> Result<iroh::endpoint::Endpoint> {
         Ok(self.endpoint.clone())
+    }
+
+    pub async fn close(&mut self) -> Result<()> {
+        for (_, conn) in self.peers.drain() {
+            let _ = conn.close().await;
+        }
+        Ok(())
     }
 }
 
