@@ -373,7 +373,7 @@ impl Router {
 
         // to avoid overflow and therfore dublicates we check if this ip is already contained
         if state.node_id_ip_dict.values().any(|v| v.eq(&next_ip)) {
-            bail!("invalid ip")
+            return Err(anyhow::anyhow!("invalid ip"))
         }
 
         Ok(next_ip)
