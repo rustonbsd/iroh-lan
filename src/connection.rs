@@ -156,8 +156,8 @@ impl Actor for ConnActor {
                 Some(action) = self.rx.recv() => {
                     action(self).await;
                 }
-                _ = self.send_stream.as_mut().expect("conditional failed").stopped(), if self.conn.is_some() 
-                        && self.send_stream.is_some() 
+                _ = self.send_stream.as_mut().expect("conditional failed").stopped(), if self.send_stream.is_some()
+                        && self.conn.is_some()
                         && self.state != ConnState::Closed 
                         && now > self.last_reconnect + self.reconnect_backoff => {
                     if reconnect_count < MAX_RECONNECTS {
