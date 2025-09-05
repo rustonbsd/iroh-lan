@@ -152,20 +152,19 @@ impl Conn {
 impl Actor for ConnActor {
     async fn run(&mut self) -> Result<()> {
         let mut reconnect_count = 0;
+        let mut reconnect_ticker = tokio::time::interval(Duration::from_millis(500));
         loop {
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             tokio::select! {
                 Some(action) = self.rx.recv() => {
                     action(self).await;
                 }
-                Ok(_) = async {
-                    if let Some(send) = &mut self.send_stream {
-                        send.priority()
-                    } else {
-                        futures::future::pending().await
-                    }
-                }, if self.state != ConnState::Closed
-                        && now > self.last_reconnect + self.reconnect_backoff => {
+                _ = reconnect_ticker.tick(), if self.state != ConnState::Closed
+                    && now > self.last_reconnect + self.reconnect_backoff
+                    && (
+                        self.send_stream.is_none() ||
+                        self.conn.as_ref().and_then(|c| c.close_reason()).is_some()
+                    ) => {
                     if reconnect_count < MAX_RECONNECTS {
                         println!("Send stream stopped");
                         if self.try_reconnect().await.is_err() {
@@ -180,12 +179,9 @@ impl Actor for ConnActor {
                     }
                 }
                 stream_recv = async {
-                    if let Some(recv) = &mut self.recv_stream {
-                        recv.read_u32_le().await
-                    } else {
-                        futures::future::pending().await
-                    } 
-                }, if self.state != ConnState::Closed => {
+                    let recv = self.recv_stream.as_mut().expect("recv_stream present");
+                    recv.read_u32_le().await
+                }, if self.state != ConnState::Closed && self.recv_stream.is_some() => {
                     if let Ok(frame_size) = stream_recv {
                         let _res = self.remote_read_next(frame_size).await;
                         //println!("self.recv_stream.read_u32_le(): {}", _res.is_ok())
