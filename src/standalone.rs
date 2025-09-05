@@ -43,8 +43,6 @@ pub async fn run(name: &str, password: &str, creator_mode: bool) -> anyhow::Resu
                             }});
                             println!("[ERROR] failed to route packet to {:?}", remote_node_id);
                             println!("Reason: {:?}", err);
-                        } else {
-                            println!("Routed packet to {:?}", remote_node_id);
                         }
                     }
                 }
