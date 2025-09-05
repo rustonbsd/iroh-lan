@@ -86,7 +86,7 @@ impl DirectActor {
 
         match self.peers.entry(remote_node_id) {
             Entry::Occupied(mut entry) => {
-                entry.get_mut().incoming_connection(conn).await?;
+                entry.get_mut().incoming_connection(conn,true).await?;
             }
             Entry::Vacant(entry) => {
                 let (send_stream, recv_stream) = conn.accept_bi().await?;
