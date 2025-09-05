@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     net::Ipv4Addr,
+    ops::Deref,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -16,7 +17,7 @@ use iroh::{Endpoint, SecretKey};
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
 use tokio::time::sleep;
 
-use crate::{Direct, DirectMessage, local_networking::Ipv4Pkg};
+use crate::{Direct, DirectMessage, direct_connect, local_networking::Ipv4Pkg};
 
 pub struct Router {
     pub gossip_sender: GossipSender,
@@ -258,8 +259,39 @@ impl Router {
         Builder::new()
     }
 
-    pub async fn close(self) -> Result<()> {
-        self.tun.context("failed to get tun device")?.close().await
+    pub async fn close(&mut self) {
+        if let Some(tun) = &self.tun {
+            let _ = tun.close().await;
+        }
+        self.tun = None;
+
+        let _ = self.direct.close().await;
+        let _ = &*self.direct.deref();
+
+        if let Some(topic) = self._topic.as_mut() {
+            let _ = topic;
+        }
+        self._topic = None;
+
+        let gossip_sender = &mut self.gossip_sender;
+        let _ = gossip_sender;
+
+        let gossip_receiver = &mut self.gossip_receiver;
+        let _ = gossip_receiver;
+
+        let router_requester = &mut self.router_requester;
+        let _ = router_requester;
+
+        let _router = &mut self._router;
+        let _ = _router;
+
+        let direct_connect_sender = &mut self.direct_connect_sender;
+        let _ = direct_connect_sender;
+
+        let _keep_alive_direct_connect_reader = &mut self._keep_alive_direct_connect_reader;
+        let _ = _keep_alive_direct_connect_reader;
+
+        println!("Router closed");
     }
 
     pub async fn set_tun(&mut self, tun: crate::Tun) -> Result<()> {
@@ -270,54 +302,41 @@ impl Router {
     async fn spawn(&self) -> Result<()> {
         println!("router.spawn");
         while let Some(Ok(event)) = self.gossip_receiver.next().await {
-            if let iroh_gossip::api::Event::Received(message) = event {
-                if let Ok(router_msg) = postcard::from_bytes(message.content.to_vec().as_slice()) {
-                    match router_msg {
-                        RouterMessage::StateMessage(state_message) => {
-                            if let Ok(state) = self.get_state().await {
-                                let _ = self.set_last_leader_msg(state_message.clone()).await;
-                                let _ = self
-                                    .set_node_id_ip_dict(state_message.node_id_ip_dict)
-                                    .await;
-                                if state.leader.is_none()
-                                    || (state_message.leader.is_some()
-                                        && state.leader.unwrap() != state_message.leader.unwrap())
-                                {
-                                    let _ = self.set_leader(state_message.leader.unwrap()).await;
+            match event {
+                iroh_gossip::api::Event::Received(message) => {
+                    if let Ok(router_msg) =
+                        postcard::from_bytes(message.content.to_vec().as_slice())
+                    {
+                        match router_msg {
+                            RouterMessage::StateMessage(state_message) => {
+                                if let Ok(mut state) = self.get_state().await {
+                                    let _ = self.set_last_leader_msg(state_message.clone()).await;
+                                    state.node_id_ip_dict = state_message.node_id_ip_dict.clone();
+                                    self.set_leader(state.leader.unwrap_or(self.node_id))
+                                        .await
+                                        .ok();
                                 }
                             }
-                        }
-                        RouterMessage::ReqMessage(req_message) => {
-                            if let Ok(state) = self.get_state().await {
-                                if let Some(leader) = state.leader {
-                                    if leader == self.node_id {
-                                        if let Ok(next_ip) = self.get_next_ip().await {
-                                            if self
-                                                .add_node_id_ip(req_message.node_id, next_ip)
-                                                .await
-                                                .is_ok()
-                                            {
-                                                if let Ok(state) = self.get_state().await {
-                                                    let msg =
-                                                        RouterMessage::StateMessage(StateMessage {
-                                                            node_id_ip_dict: state.node_id_ip_dict,
-                                                            timestamp: SystemTime::now()
-                                                                .duration_since(
-                                                                    SystemTime::UNIX_EPOCH,
-                                                                )
-                                                                .unwrap_or(Duration::from_secs(0))
-                                                                .as_secs()
-                                                                as i64,
-                                                            leader: state.leader,
-                                                        });
-                                                    let data = postcard::to_stdvec(&msg)
-                                                        .expect("serialization failed");
-                                                    let _ =
-                                                        self.gossip_sender.broadcast(data).await;
-                                                }
+                            RouterMessage::ReqMessage(req_message) => {
+                                if let Ok(mut state) = self.get_state().await {
+                                    if let Some(leader) = state.leader {
+                                        if leader == self.node_id
+                                            && !state
+                                                .node_id_ip_dict
+                                                .contains_key(&req_message.node_id)
+                                        {
+                                            if let Ok(next_ip) = self.get_next_ip().await {
+                                                state
+                                                    .node_id_ip_dict
+                                                    .insert(req_message.node_id, next_ip);
+                                                let _ = self
+                                                    .set_node_id_ip_dict(
+                                                        state.node_id_ip_dict.clone(),
+                                                    )
+                                                    .await;
+                                                let _ =
+                                                    self.send_state_message(state.clone()).await;
                                             }
-                                        } else {
-                                            //println!("get next ip failed");
                                         }
                                     }
                                 }
@@ -325,31 +344,67 @@ impl Router {
                         }
                     }
                 }
-            } else if let iroh_gossip::api::Event::NeighborDown(node_id) = event {
-                let mut state = self.get_state().await?;
-                if state.node_id_ip_dict.remove(&node_id).is_some() {
-                    let _ = self.set_node_id_ip_dict(state.node_id_ip_dict.clone()).await;
-                }
-                // send state packet if leader
-                if let Some(leader) = state.leader {
-                    if leader == self.node_id {
-                        let msg = RouterMessage::StateMessage(StateMessage {
-                            node_id_ip_dict: state.node_id_ip_dict,
-                            timestamp: SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap_or(Duration::from_secs(0))
-                                .as_secs() as i64,
-                            leader: state.leader,
-                        });
-                        let data = postcard::to_stdvec(&msg).expect("serialization failed");
-                        let _ = self.gossip_sender.broadcast(data).await;
+                iroh_gossip::api::Event::NeighborDown(node_id) => {
+                    let mut state = self.get_state().await?;
+
+                    // Remove newly downed peer
+                    if state.node_id_ip_dict.remove(&node_id).is_some() {
+                        let _ = self
+                            .set_node_id_ip_dict(state.node_id_ip_dict.clone())
+                            .await;
+                    }
+
+                    // If leader, inform everyone via state_message
+                    // if leader down, elect self as leader and inform everyone via state_message (last one wins, fine for now #TODO)
+                    if let Some(leader) = state.leader {
+                        if leader == self.node_id {
+                            let _ = self.send_state_message(state).await;
+                        } else if leader == node_id {
+                            state.leader = Some(self.node_id);
+                            let _ = self.send_state_message(state).await;
+                            let _ = self.set_leader(self.node_id).await;
+                        }
+                    } else {
+                        // no leader set, elect self as leader and inform everyone via state_message (last one wins, fine for now #TODO)
+                        state.leader = Some(self.node_id);
+                        let _ = self.send_state_message(state).await;
+                        let _ = self.set_leader(self.node_id).await;
                     }
                 }
+                iroh_gossip::api::Event::NeighborUp(node_id) => {
+                    let mut state = self.get_state().await?;
+
+                    if let Some(leader) = state.leader {
+                        if leader == self.node_id && !state.node_id_ip_dict.contains_key(&node_id) {
+                            if let Ok(next_ip) = self.get_next_ip().await {
+                                state.node_id_ip_dict.insert(node_id, next_ip);
+                                let _ = self
+                                    .set_node_id_ip_dict(state.node_id_ip_dict.clone())
+                                    .await;
+                                let _ = self.send_state_message(state.clone()).await;
+                            }
+                        }
+                    }
+                }
+                _ => (),
             }
         }
 
         //println!("Failed!!!!");
         Ok(())
+    }
+
+    async fn send_state_message(&self, state: RouterState) -> Result<()> {
+        let msg = RouterMessage::StateMessage(StateMessage {
+            node_id_ip_dict: state.node_id_ip_dict,
+            timestamp: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0))
+                .as_secs() as i64,
+            leader: state.leader,
+        });
+        let data = postcard::to_stdvec(&msg).expect("serialization failed");
+        self.gossip_sender.broadcast(data).await
     }
 
     async fn get_next_ip(&self) -> Result<Ipv4Addr> {
@@ -373,17 +428,10 @@ impl Router {
 
         // to avoid overflow and therfore dublicates we check if this ip is already contained
         if state.node_id_ip_dict.values().any(|v| v.eq(&next_ip)) {
-            return Err(anyhow::anyhow!("invalid ip"))
+            return Err(anyhow::anyhow!("invalid ip"));
         }
 
         Ok(next_ip)
-    }
-
-    async fn add_node_id_ip(&self, node_id: NodeId, ip: Ipv4Addr) -> Result<()> {
-        let mut state = self.get_state().await?;
-        let _ = state.node_id_ip_dict.insert(node_id, ip);
-        self.set_node_id_ip_dict(state.node_id_ip_dict).await?;
-        Ok(())
     }
 
     async fn set_last_leader_msg(&self, latest_leader_msg: StateMessage) -> Result<()> {

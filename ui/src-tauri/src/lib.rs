@@ -1,3 +1,5 @@
+use std::ops::Deref;
+
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use tokio::sync::Mutex;
@@ -95,6 +97,9 @@ async fn list_peers() -> Result<Vec<PeerInfo>, String> {
 #[tauri::command]
 async fn close() -> Result<(), String> {
     let mut guard = ROUTER.lock().await;
+    if let Some((router,_)) = guard.as_mut() {
+        router.close().await;
+    }
     *guard = None; // drop
     std::process::exit(0);
 
