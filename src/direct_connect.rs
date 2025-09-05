@@ -115,33 +115,22 @@ impl DirectActor {
     async fn route_packet(&mut self, to: NodeId, pkg: DirectMessage) -> Result<()> {
         match self.peers.entry(to) {
             Entry::Occupied(entry) => {
-                if !entry.get().actor_is_running().await {
-                    entry.get().close().await.ok();
-                    println!("Connection to peer {} is not running, removing", to);
+                if entry.get().get_state().await == crate::connection::ConnState::Closed {
+                    println!("Connection to peer {} closed, removing", to);
                     entry.remove();
                     return Err(anyhow::anyhow!("connection to peer is not running"));
                 }
                 entry.get().write(pkg).await?;
             }
-            Entry::Vacant(_) => {
-                return Err(anyhow::anyhow!("no connection to peer"));
-                /*
-                println!("Creating new connection to peer {}", to);
-                let quic_conn = self.endpoint.connect(to, Direct::ALPN).await?;
-                let (send_stream, recv_stream) = quic_conn.open_bi().await?;
-
-                println!("Connected to peer {}", to);
-                let conn = Conn::new(
+            Entry::Vacant(entry) => {
+                let conn = Conn::connect(
                     self.endpoint.clone(),
-                    quic_conn,
-                    send_stream,
-                    recv_stream,
+                    to,
                     self.direct_connect_tx.clone(),
-                )
-                .await?;
+                ).await;
+
                 conn.write(pkg).await?;
                 entry.insert(conn);
-                */
             }
         }
 
