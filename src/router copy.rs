@@ -9,52 +9,215 @@ use std::{
 use distributed_topic_tracker::{
     AutoDiscoveryGossip, GossipReceiver, GossipSender, RecordPublisher, Topic, TopicId,
 };
-use futures::{FutureExt, StreamExt};
 use iroh::NodeId;
-use iroh_blobs::{api::blobs::Blobs, store::mem::MemStore};
-use iroh_docs::{
-    AuthorId, Entry,
-    api::Doc,
-    protocol::Docs,
-    store::{FlatQuery, Query, QueryBuilder, SingleLatestPerKeyQuery},
-};
+use iroh_blobs::store::mem::MemStore;
+use iroh_docs::protocol::Docs;
 
 use anyhow::{Context, Result, bail};
 use iroh::{Endpoint, SecretKey};
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
-use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use tokio::time::sleep;
 
-use crate::{
-    Direct, DirectMessage, actor::Actor, actor::Actor, direct_connect, local_networking::Ipv4Pkg,
-    standalone::Builder,
-};
+use crate::{Direct, DirectMessage, direct_connect, local_networking::Ipv4Pkg};
 
-#[derive(Debug, Clone)]
 pub struct Router {
-    pub(crate) api: crate::actor::Handle<RouterActor>,
-}
-
-#[derive(Debug)]
-pub struct RouterActor {
-    pub(crate) rx: tokio::sync::mpsc::Receiver<crate::actor::Action<RouterActor>>,
-
     pub gossip_sender: GossipSender,
     pub gossip_receiver: GossipReceiver,
-
-    pub(crate) blobs: MemStore,
-    pub(crate) _docs: Docs,
-    pub(crate) doc: Doc,
-    pub(crate) author_id: AuthorId,
-
-    pub(crate) _router: iroh::protocol::Router,
+    docs: Docs,
+    _router: iroh::protocol::Router,
     pub node_id: NodeId,
-    pub(crate) _topic: Option<Topic>,
+    _topic: Option<Topic>,
     pub direct: Arc<Direct>,
-    pub(crate) direct_connect_sender: tokio::sync::broadcast::Sender<DirectMessage>,
-    pub(crate) _keep_alive_direct_connect_reader: tokio::sync::broadcast::Receiver<DirectMessage>,
+    pub direct_connect_sender: tokio::sync::broadcast::Sender<DirectMessage>,
+    pub _keep_alive_direct_connect_reader: tokio::sync::broadcast::Receiver<DirectMessage>,
     pub tun: Option<crate::Tun>,
+}
+
+impl Clone for Router {
+    fn clone(&self) -> Self {
+        Self {
+            gossip_sender: self.gossip_sender.clone(),
+            gossip_receiver: self.gossip_receiver.clone(),
+            _router: self._router.clone(),
+            docs: self.docs.clone(),
+            node_id: self.node_id.clone(),
+            _topic: self._topic.clone(),
+            direct: Arc::clone(&self.direct),
+            direct_connect_sender: self.direct_connect_sender.clone(),
+            _keep_alive_direct_connect_reader: self.direct_connect_sender.subscribe(),
+            tun: self.tun.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Builder {
+    entry_name: String,
+    secret_key: SecretKey,
+    creator_mode: bool,
+    password: String,
+    tun: Option<crate::Tun>,
+}
+
+impl Builder {
+    pub fn new() -> Builder {
+        Builder::default()
+    }
+
+    pub fn entry_name(mut self, entry_name: &str) -> Self {
+        self.entry_name = entry_name.to_string();
+        self
+    }
+
+    pub fn secret_key(mut self, secret_key: SecretKey) -> Self {
+        self.secret_key = secret_key;
+        self
+    }
+
+    pub fn creator_mode(mut self) -> Self {
+        self.creator_mode = true;
+        self
+    }
+
+    pub fn password(mut self, password: &str) -> Self {
+        self.password = password.to_string();
+        self
+    }
+
+    pub fn tun(mut self, tun: crate::Tun) -> Self {
+        self.tun = Some(tun);
+        self
+    }
+
+    pub async fn build(&self) -> Result<Router> {
+        let endpoint = Endpoint::builder()
+            .discovery_n0()
+            .secret_key(self.secret_key.clone())
+            .bind()
+            .await?;
+
+        let gossip_config = HyparviewConfig {
+            neighbor_request_timeout: Duration::from_millis(2000),
+            ..Default::default()
+        };
+
+        let gossip = Gossip::builder()
+            .membership_config(gossip_config)
+            .spawn(endpoint.clone());
+
+        let blobs = MemStore::default();
+        let docs = Docs::memory()
+            .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
+            .await?;
+        
+        let (direct_connect_tx, _direct_connect_rx) = tokio::sync::broadcast::channel(1024 * 16);
+        let direct = Direct::new(endpoint.clone(), direct_connect_tx.clone());
+
+        let _router = iroh::protocol::Router::builder(endpoint.clone())
+            .accept(iroh_gossip::ALPN, gossip.clone())
+            .accept(crate::Direct::ALPN, direct.clone())
+            .accept(iroh_docs::ALPN, docs)
+            .accept(
+                iroh_blobs::ALPN,
+                iroh_blobs::BlobsProtocol::new(&blobs, endpoint.clone(), None),
+            )
+            .spawn();
+
+        let topic_initials = format!("lanparty-{}", self.entry_name);
+        let secret_initials = format!("{topic_initials}-{}-secret", self.password)
+            .as_bytes()
+            .to_vec();
+
+        let mut topic_hasher = sha2::Sha512::new();
+        topic_hasher.update("iroh-lan-topic");
+        topic_hasher.update(&secret_initials);
+        let topic_hash = z32::encode(topic_hasher.finalize().as_slice());
+
+        let record_publisher = RecordPublisher::new(
+            TopicId::new(topic_hash),
+            endpoint.node_id(),
+            self.secret_key.secret().clone(),
+            None,
+            secret_initials,
+        );
+        let topic = if self.creator_mode {
+            gossip
+                .subscribe_and_join_with_auto_discovery_no_wait(record_publisher)
+                .await?
+        } else {
+            gossip
+                .subscribe_and_join_with_auto_discovery(record_publisher)
+                .await?
+        };
+
+        let (gossip_sender, gossip_receiver) = topic.split().await?;
+
+        let (router_state_sender, router_state_reader) = tokio::sync::mpsc::channel(1024 * 16);
+
+        /*
+        if self.creator_mode {
+            let mut hs = HashMap::<NodeId, Ipv4Addr>::new();
+            hs.insert(endpoint.node_id(), Ipv4Addr::new(172, 22, 0, 2));
+            hs
+        }
+        */
+        
+        let mut router = Router {
+            gossip_sender,
+            gossip_receiver,
+            docs,
+            node_id: endpoint.node_id(),
+            _topic: Some(topic),
+            direct: Arc::new(direct),
+            _keep_alive_direct_connect_reader: direct_connect_tx.subscribe(),
+            direct_connect_sender: direct_connect_tx,
+            _router,
+            tun: None,
+        };
+
+        // ---- refactored till here below wild west till end of function ----
+
+        /*
+        while router.my_ip().await.is_none() {
+            println!("Waiting to get an IP address...");
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        let my_ip = router
+            .my_ip()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("failed to get my IP"))?;
+        println!("My IP address is {}", my_ip);
+
+        let (remote_writer, _remote_reader) = tokio::sync::broadcast::channel(1024 * 16);
+        let tun = crate::Tun::new((my_ip.octets()[2], my_ip.octets()[3]), remote_writer)?;
+
+        router.set_tun(tun).await?;
+
+        if !self.creator_mode {
+            sleep(Duration::from_millis(1000)).await;
+            let data = postcard::to_stdvec(&RouterMessage::ReqMessage(ReqMessage {
+                node_id: endpoint.node_id(),
+            }))?;
+            router.gossip_sender.broadcast(data).await?;
+        }
+        */
+
+        Ok(router)
+    }
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self {
+            creator_mode: false,
+            entry_name: String::default(),
+            secret_key: SecretKey::generate(&mut rand::thread_rng()),
+            password: String::default(),
+            tun: None,
+        }
+    }
 }
 
 impl Router {
@@ -118,11 +281,10 @@ impl Router {
                                 if let Ok(mut state) = self.get_state().await {
                                     let _ = self.set_last_leader_msg(state_message.clone()).await;
                                     state.node_id_ip_dict = state_message.node_id_ip_dict.clone();
-                                    let _ =
-                                        self.set_leader(state.leader.unwrap_or(self.node_id)).await;
                                     let _ = self
-                                        .set_node_id_ip_dict(state_message.node_id_ip_dict)
+                                        .set_leader(state.leader.unwrap_or(self.node_id))
                                         .await;
+                                    let _ = self.set_node_id_ip_dict(state_message.node_id_ip_dict).await;
                                 }
                             }
                             RouterMessage::ReqMessage(req_message) => {
@@ -333,90 +495,30 @@ impl Router {
     }
 }
 
-impl Actor for RouterActor {
-    async fn run(&mut self) -> Result<()> {
+impl RouterState {
+    async fn spawn(&mut self, reader: tokio::sync::mpsc::Receiver<RouterRequest>) {
+        let mut reader = reader;
         loop {
             tokio::select! {
-                Some(action) = self.rx.recv() => {
-                    action(self).await;
-                }
-                _ = tokio::signal::ctrl_c() => {
-                    break
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct IpCandidate {
-    ip: Ipv4Addr,
-    node_id: NodeId,
-}
-
-async fn entry_to_value<S: for<'a> Deserialize<'a>>(
-    blobs: MemStore,
-    entry: &Entry,
-) -> anyhow::Result<S> {
-    let b = blobs.get_bytes(entry.content_hash()).await?;
-    postcard::from_bytes::<S>(&b).context("failed to deserialize value")
-}
-
-fn key_ip_assigned(ip: Ipv4Addr) -> impl Into<Query> {
-    QueryBuilder::<SingleLatestPerKeyQuery>::default()
-        .key_exact(format!("/assigned/ip/{}", ip))
-        .build()
-}
-
-fn key_prefix_ip_candidates(ip: Ipv4Addr) -> impl Into<Query> {
-    QueryBuilder::<FlatQuery>::default()
-        .key_exact(format!("/candidates/ip/{ip}"))
-        .build()
-}
-
-impl RouterActor {
-    // Assigned IPs
-
-    async fn read_ip_assignment(&mut self, ip: Ipv4Addr) -> Result<NodeId> {
-        postcard::from_bytes::<NodeId>(
-            &self
-                .doc
-                .get_one(key_ip_assigned(ip))
-                .await?
-                .context("no assignment found")?
-                .to_vec(),
-        )
-        .context("failed to deserialize node id")
-    }
-
-    // Candidate IPs
-
-    async fn read_ip_candidates(&mut self, ip: Ipv4Addr) -> Result<Vec<IpCandidate>> {
-        let entries = self
-            .doc
-            .get_many(key_prefix_ip_candidates(ip))
-            .await?
-            .collect::<Vec<_>>()
-            .await;
-
-        let mut candidates = Vec::new();
-        for entry_res in entries.into_iter() {
-            if let Ok(entry) = entry_res {
-                if let Ok(b) = self.blobs.get_bytes(entry.content_hash()).await {
-                    if let Ok(candidate) = postcard::from_bytes::<IpCandidate>(&b) {
-                        candidates.push(candidate);
-                    }
+                Some(router_request) = reader.recv() => match router_request {
+                    RouterRequest::GetRouterState(sender)=>{
+                        let _ = sender.send(self.clone());
+                    },
+                    RouterRequest::SetNodeIdIpDict(hash_map, sender) => {
+                        self.node_id_ip_dict = hash_map;
+                        let _ = sender.send(());
+                    },
+                    RouterRequest::SetLeader(public_key, sender) => {
+                        self.leader = Some(public_key);
+                        println!("New leader: {}", public_key);
+                        let _ = sender.send(());
+                    },
+                    RouterRequest::SetLastLeaderMsg(router_message, sender) => {
+                        self.last_leader_msg = Some(router_message);
+                        let _ = sender.send(());
+                    },
                 }
             }
         }
-
-        Ok(candidates)
     }
-
-    // write ip assigned
-    // write ip candidate
-    // delete ip candidates all
-    
 }

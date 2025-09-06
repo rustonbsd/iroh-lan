@@ -114,7 +114,7 @@ impl Conn {
             let s = s.clone();
             async move {
                 if let Ok(conn) = endpoint.connect(node_id, crate::Direct::ALPN).await {
-                    let _ = s.incoming_connection(conn,false).await;
+                    let _ = s.incoming_connection(conn, false).await;
                 }
             }
         });
@@ -153,6 +153,7 @@ impl Actor for ConnActor {
     async fn run(&mut self) -> Result<()> {
         let mut reconnect_count = 0;
         let mut reconnect_ticker = tokio::time::interval(Duration::from_millis(500));
+        let mut notification_ticker = tokio::time::interval(Duration::from_secs(500));
         loop {
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             tokio::select! {
@@ -176,6 +177,16 @@ impl Actor for ConnActor {
                     } else {
                         println!("Max reconnects reached, closing connection to {}", self.conn_node_id);
                         break;
+                    }
+                }
+                _ = notification_ticker.tick(), if self.state != ConnState::Closed
+                        && (!self.sender_queue.is_empty() 
+                            || self.receiver_queue.is_empty()) => {
+                    if !self.sender_queue.is_empty() {
+                        self.sender_notify.notify_one();
+                    }
+                    if !self.receiver_queue.is_empty() {
+                        self.receiver_notify.notify_one();
                     }
                 }
                 stream_recv = async {
@@ -270,7 +281,11 @@ impl ConnActor {
         self.sender_notify.notify_one();
     }
 
-    pub async fn incoming_connection(&mut self, conn: Connection, accept_not_open: bool) -> Result<()> {
+    pub async fn incoming_connection(
+        &mut self,
+        conn: Connection,
+        accept_not_open: bool,
+    ) -> Result<()> {
         let (send_stream, recv_stream) = if accept_not_open {
             conn.accept_bi().await?
         } else {
