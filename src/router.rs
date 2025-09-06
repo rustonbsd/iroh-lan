@@ -315,8 +315,8 @@ impl Router {
                                     state.node_id_ip_dict = state_message.node_id_ip_dict.clone();
                                     let _ = self
                                         .set_leader(state.leader.unwrap_or(self.node_id))
-                                        .await
-                                        .ok();
+                                        .await;
+                                    let _ = self.set_node_id_ip_dict(state_message.node_id_ip_dict).await;
                                 }
                             }
                             RouterMessage::ReqMessage(req_message) => {
