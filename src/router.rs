@@ -309,15 +309,18 @@ impl Router {
                     {
                         match router_msg {
                             RouterMessage::StateMessage(state_message) => {
+                                println!("message:state_message from {}", message.delivered_from);
                                 if let Ok(mut state) = self.get_state().await {
                                     let _ = self.set_last_leader_msg(state_message.clone()).await;
                                     state.node_id_ip_dict = state_message.node_id_ip_dict.clone();
-                                    self.set_leader(state.leader.unwrap_or(self.node_id))
+                                    let _ = self
+                                        .set_leader(state.leader.unwrap_or(self.node_id))
                                         .await
                                         .ok();
                                 }
                             }
                             RouterMessage::ReqMessage(req_message) => {
+                                println!("message:req_message from {}", message.delivered_from);
                                 if let Ok(mut state) = self.get_state().await {
                                     if let Some(leader) = state.leader {
                                         if leader == self.node_id
@@ -345,43 +348,46 @@ impl Router {
                     }
                 }
                 iroh_gossip::api::Event::NeighborDown(node_id) => {
-                    let mut state = self.get_state().await?;
+                    println!("NeighborDown: {}", node_id);
+                    if let Some(mut state) = self.get_state().await.ok() {
+                        // Remove newly downed peer
+                        if state.node_id_ip_dict.remove(&node_id).is_some() {
+                            let _ = self
+                                .set_node_id_ip_dict(state.node_id_ip_dict.clone())
+                                .await;
+                        }
 
-                    // Remove newly downed peer
-                    if state.node_id_ip_dict.remove(&node_id).is_some() {
-                        let _ = self
-                            .set_node_id_ip_dict(state.node_id_ip_dict.clone())
-                            .await;
-                    }
-
-                    // If leader, inform everyone via state_message
-                    // if leader down, elect self as leader and inform everyone via state_message (last one wins, fine for now #TODO)
-                    if let Some(leader) = state.leader {
-                        if leader == self.node_id {
-                            let _ = self.send_state_message(state).await;
-                        } else if leader == node_id {
+                        // If leader, inform everyone via state_message
+                        // if leader down, elect self as leader and inform everyone via state_message (last one wins, fine for now #TODO)
+                        if let Some(leader) = state.leader {
+                            if leader == self.node_id {
+                                let _ = self.send_state_message(state).await;
+                            } else if leader == node_id {
+                                state.leader = Some(self.node_id);
+                                let _ = self.send_state_message(state).await;
+                                let _ = self.set_leader(self.node_id).await;
+                            }
+                        } else {
+                            // no leader set, elect self as leader and inform everyone via state_message (last one wins, fine for now #TODO)
                             state.leader = Some(self.node_id);
                             let _ = self.send_state_message(state).await;
                             let _ = self.set_leader(self.node_id).await;
                         }
-                    } else {
-                        // no leader set, elect self as leader and inform everyone via state_message (last one wins, fine for now #TODO)
-                        state.leader = Some(self.node_id);
-                        let _ = self.send_state_message(state).await;
-                        let _ = self.set_leader(self.node_id).await;
                     }
                 }
                 iroh_gossip::api::Event::NeighborUp(node_id) => {
-                    let mut state = self.get_state().await?;
-
-                    if let Some(leader) = state.leader {
-                        if leader == self.node_id && !state.node_id_ip_dict.contains_key(&node_id) {
-                            if let Ok(next_ip) = self.get_next_ip().await {
-                                state.node_id_ip_dict.insert(node_id, next_ip);
-                                let _ = self
-                                    .set_node_id_ip_dict(state.node_id_ip_dict.clone())
-                                    .await;
-                                let _ = self.send_state_message(state.clone()).await;
+                    if let Some(mut state) = self.get_state().await.ok() {
+                        if let Some(leader) = state.leader {
+                            if leader == self.node_id
+                                && !state.node_id_ip_dict.contains_key(&node_id)
+                            {
+                                if let Ok(next_ip) = self.get_next_ip().await {
+                                    state.node_id_ip_dict.insert(node_id, next_ip);
+                                    let _ = self
+                                        .set_node_id_ip_dict(state.node_id_ip_dict.clone())
+                                        .await;
+                                    let _ = self.send_state_message(state.clone()).await;
+                                }
                             }
                         }
                     }
@@ -509,8 +515,7 @@ impl Router {
             if let Ok(data) = postcard::to_stdvec(&RouterMessage::ReqMessage(ReqMessage {
                 node_id: self.node_id,
             })) {
-                let res = self.gossip_sender.broadcast(data).await;
-                println!("Requested my IP address: {:?}", res);
+                let _ = self.gossip_sender.broadcast(data).await;
             }
             None
         }
