@@ -7,7 +7,7 @@ use iroh_docs::protocol::Docs;
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
 
 use crate::{
-    act, actor::{Action, Actor, Handle}, actor_impr::{box_fut, IntoActorFut}, local_networking::Ipv4Pkg, router::RouterIp, Direct, DirectMessage, Router, Tun
+    act, actor::{Action, Actor, Handle}, local_networking::Ipv4Pkg, router::RouterIp, Direct, DirectMessage, Router, Tun
 };
 
 #[derive(Debug, Clone)]

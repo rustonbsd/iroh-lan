@@ -20,7 +20,10 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use tracing::{info, warn};
 
-use crate::{act, act_async, act_async_ok, act_ok, actor::{Actor, Handle}};
+use crate::{
+    act, act_ok,
+    actor::{Actor, Handle},
+};
 
 #[derive(Debug, Clone)]
 pub struct Builder {
@@ -214,9 +217,11 @@ impl Router {
     }
 
     pub async fn get_ip_state(&self) -> Result<RouterIp> {
-        self.api.call(act_async_ok!(actor => {
-            actor.my_ip.clone()
-        })).await
+        self.api
+            .call(act_ok!(actor => async move {
+                    actor.my_ip.clone()
+            }))
+            .await
     }
 
     pub async fn get_ip_from_node_id(&self, node_id: NodeId) -> Result<Ipv4Addr> {
@@ -439,7 +444,7 @@ impl RouterActor {
     }
 
     // write ip candidate
-async fn write_ip_candidate(&mut self, ip: Ipv4Addr, node_id: NodeId) -> Result<IpCandidate> {
+    async fn write_ip_candidate(&mut self, ip: Ipv4Addr, node_id: NodeId) -> Result<IpCandidate> {
         // already assigned? don't write
         if self.read_ip_assignment(ip).await.is_ok() {
             anyhow::bail!("ip already assigned");
