@@ -1,43 +1,197 @@
-use std::{
-    collections::HashMap,
-    net::Ipv4Addr,
-    ops::Deref,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{net::Ipv4Addr, time::Duration};
 
 use distributed_topic_tracker::{
     AutoDiscoveryGossip, GossipReceiver, GossipSender, RecordPublisher, Topic, TopicId,
 };
-use futures::{FutureExt, StreamExt};
-use iroh::NodeId;
-use iroh_blobs::{api::blobs::Blobs, store::mem::MemStore};
+use futures::StreamExt;
+use iroh::{NodeAddr, NodeId};
+use iroh_blobs::store::mem::MemStore;
 use iroh_docs::{
-    AuthorId, Entry,
+    AuthorId, Entry, NamespaceSecret,
     api::Doc,
     protocol::Docs,
-    store::{FlatQuery, Query, QueryBuilder, SingleLatestPerKeyQuery},
+    store::{Query, QueryBuilder, SingleLatestPerKeyQuery},
 };
 
 use anyhow::{Context, Result, bail};
 use iroh::{Endpoint, SecretKey};
-use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
+use iroh_gossip::net::Gossip;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use tokio::time::sleep;
+use tracing::{info, warn};
 
-use crate::{
-    Direct, DirectMessage, actor::Actor, actor::Actor, direct_connect, local_networking::Ipv4Pkg,
-    standalone::Builder,
-};
+use crate::actor::{Actor, Handle};
+
+#[derive(Debug, Clone)]
+pub struct Builder {
+    entry_name: String,
+    secret_key: SecretKey,
+    creator_mode: bool,
+    password: String,
+    endpoint: Option<Endpoint>,
+    gossip: Option<Gossip>,
+    docs: Option<Docs>,
+    blobs: MemStore,
+}
+
+impl Builder {
+    pub fn new() -> Builder {
+        Builder::default()
+    }
+
+    pub fn entry_name(mut self, entry_name: &str) -> Self {
+        self.entry_name = entry_name.to_string();
+        self
+    }
+
+    pub fn secret_key(mut self, secret_key: SecretKey) -> Self {
+        self.secret_key = secret_key;
+        self
+    }
+
+    pub fn creator_mode(mut self) -> Self {
+        self.creator_mode = true;
+        self
+    }
+
+    pub fn password(mut self, password: &str) -> Self {
+        self.password = password.to_string();
+        self
+    }
+
+    pub fn endpoint(mut self, endpoint: Endpoint) -> Self {
+        self.endpoint = Some(endpoint);
+        self
+    }
+
+    pub fn gossip(mut self, gossip: Gossip) -> Self {
+        self.gossip = Some(gossip);
+        self
+    }
+
+    pub fn docs(mut self, docs: Docs) -> Self {
+        self.docs = Some(docs);
+        self
+    }
+
+    pub fn blobs(mut self, blobs: MemStore) -> Self {
+        self.blobs = blobs;
+        self
+    }
+
+    pub async fn build(&self) -> Result<Router> {
+        let endpoint = if let Some(ep) = &self.endpoint {
+            ep.clone()
+        } else {
+            bail!("endpoint must be set");
+        };
+        let gossip = if let Some(g) = &self.gossip {
+            g.clone()
+        } else {
+            bail!("gossip must be set");
+        };
+        let docs = if let Some(d) = &self.docs {
+            d.clone()
+        } else {
+            bail!("docs must be set");
+        };
+        let blobs = self.blobs.clone();
+
+        let topic_initials = format!("lanparty-{}", self.entry_name);
+        let secret_initials = format!("{topic_initials}-{}-secret", self.password)
+            .as_bytes()
+            .to_vec();
+
+        let mut topic_hasher = sha2::Sha512::new();
+        topic_hasher.update("iroh-lan-topic");
+        topic_hasher.update(&secret_initials);
+        let topic_hash: [u8; 32] = topic_hasher.finalize()[..32].try_into()?;
+
+        let record_publisher = RecordPublisher::new(
+            TopicId::new(z32::encode(&topic_hash)),
+            endpoint.node_id(),
+            self.secret_key.secret().clone(),
+            None,
+            secret_initials,
+        );
+        let topic = if self.creator_mode {
+            gossip
+                .subscribe_and_join_with_auto_discovery_no_wait(record_publisher)
+                .await?
+        } else {
+            gossip
+                .subscribe_and_join_with_auto_discovery(record_publisher)
+                .await?
+        };
+        let (gossip_sender, gossip_receiver) = topic.split().await?;
+
+        let doc_peers = gossip_receiver
+            .neighbors()
+            .await
+            .iter()
+            .map(|pub_key| NodeAddr::new(pub_key.clone()))
+            .collect::<Vec<_>>();
+
+        warn!("[Doc peers]: {:?}", doc_peers);
+
+        let author_id = docs.author_create().await?;
+        let doc = docs
+            .import(iroh_docs::DocTicket {
+                capability: iroh_docs::Capability::Write(NamespaceSecret::from_bytes(&topic_hash)),
+                nodes: doc_peers.clone(),
+            })
+            .await?;
+
+        let (api, rx) = Handle::<crate::router::RouterActor>::channel(1024 * 16);
+        tokio::spawn(async move {
+            let mut router_actor = RouterActor {
+                gossip_sender,
+                gossip_receiver,
+                author_id,
+                _docs: docs,
+                doc,
+                node_id: endpoint.node_id(),
+                _topic: Some(topic),
+                rx,
+                blobs,
+                my_ip: RouterIp::NoIp,
+            };
+            router_actor.run().await
+        });
+
+        Ok(Router { api })
+    }
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self {
+            creator_mode: false,
+            entry_name: String::default(),
+            secret_key: SecretKey::generate(&mut rand::thread_rng()),
+            password: String::default(),
+            endpoint: None,
+            gossip: None,
+            docs: None,
+            blobs: MemStore::new(),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Router {
-    pub(crate) api: crate::actor::Handle<RouterActor>,
+    api: crate::actor::Handle<RouterActor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouterIp {
+    NoIp,
+    AquiringIp(IpCandidate, tokio::time::Instant),
+    AssignedIp(Ipv4Addr),
 }
 
 #[derive(Debug)]
-pub struct RouterActor {
+struct RouterActor {
     pub(crate) rx: tokio::sync::mpsc::Receiver<crate::actor::Action<RouterActor>>,
 
     pub gossip_sender: GossipSender,
@@ -48,13 +202,10 @@ pub struct RouterActor {
     pub(crate) doc: Doc,
     pub(crate) author_id: AuthorId,
 
-    pub(crate) _router: iroh::protocol::Router,
     pub node_id: NodeId,
     pub(crate) _topic: Option<Topic>,
-    pub direct: Arc<Direct>,
-    pub(crate) direct_connect_sender: tokio::sync::broadcast::Sender<DirectMessage>,
-    pub(crate) _keep_alive_direct_connect_reader: tokio::sync::broadcast::Receiver<DirectMessage>,
-    pub tun: Option<crate::Tun>,
+
+    pub my_ip: RouterIp,
 }
 
 impl Router {
@@ -62,279 +213,30 @@ impl Router {
         Builder::new()
     }
 
-    pub async fn close(&mut self) {
-        if let Some(tun) = &self.tun {
-            let _ = tun.close().await;
-        }
-        self.tun = None;
-
-        let _ = self.direct.close().await;
-        let _ = &*self.direct.deref();
-
-        if let Some(topic) = self._topic.as_mut() {
-            let _ = topic;
-        }
-        self._topic = None;
-
-        let gossip_sender = &mut self.gossip_sender;
-        let _ = gossip_sender;
-
-        let gossip_receiver = &mut self.gossip_receiver;
-        let _ = gossip_receiver;
-
-        let router_requester = &mut self.router_requester;
-        let _ = router_requester;
-
-        let _router = &mut self._router;
-        let _ = _router;
-
-        let direct_connect_sender = &mut self.direct_connect_sender;
-        let _ = direct_connect_sender;
-
-        let _keep_alive_direct_connect_reader = &mut self._keep_alive_direct_connect_reader;
-        let _ = _keep_alive_direct_connect_reader;
-
-        sleep(Duration::from_millis(500)).await;
-
-        println!("Router closed");
+    pub async fn get_ip_state(&self) -> Result<RouterIp> {
+        self.api
+            .call(move |actor| Box::pin(async { Ok(actor.my_ip.clone()) }))
+            .await
     }
 
-    pub async fn set_tun(&mut self, tun: crate::Tun) -> Result<()> {
-        self.tun = Some(tun);
-        Ok(())
+    pub async fn get_ip_from_node_id(&self, node_id: NodeId) -> Result<Ipv4Addr> {
+        self.api
+            .call(move |actor| Box::pin(actor.get_ip_from_node_id(node_id)))
+            .await
     }
 
-    async fn spawn(&self) -> Result<()> {
-        println!("router.spawn");
-        while let Some(Ok(event)) = self.gossip_receiver.next().await {
-            match event {
-                iroh_gossip::api::Event::Received(message) => {
-                    if let Ok(router_msg) =
-                        postcard::from_bytes(message.content.to_vec().as_slice())
-                    {
-                        match router_msg {
-                            RouterMessage::StateMessage(state_message) => {
-                                println!("message:state_message from {}", message.delivered_from);
-                                if let Ok(mut state) = self.get_state().await {
-                                    let _ = self.set_last_leader_msg(state_message.clone()).await;
-                                    state.node_id_ip_dict = state_message.node_id_ip_dict.clone();
-                                    let _ =
-                                        self.set_leader(state.leader.unwrap_or(self.node_id)).await;
-                                    let _ = self
-                                        .set_node_id_ip_dict(state_message.node_id_ip_dict)
-                                        .await;
-                                }
-                            }
-                            RouterMessage::ReqMessage(req_message) => {
-                                println!("message:req_message from {}", message.delivered_from);
-                                if let Ok(mut state) = self.get_state().await {
-                                    if let Some(leader) = state.leader {
-                                        if leader == self.node_id
-                                            && !state
-                                                .node_id_ip_dict
-                                                .contains_key(&req_message.node_id)
-                                        {
-                                            if let Ok(next_ip) = self.get_next_ip().await {
-                                                state
-                                                    .node_id_ip_dict
-                                                    .insert(req_message.node_id, next_ip);
-                                                let _ = self
-                                                    .set_node_id_ip_dict(
-                                                        state.node_id_ip_dict.clone(),
-                                                    )
-                                                    .await;
-                                                let _ =
-                                                    self.send_state_message(state.clone()).await;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                iroh_gossip::api::Event::NeighborDown(node_id) => {
-                    println!("NeighborDown: {}", node_id);
-                    if let Some(mut state) = self.get_state().await.ok() {
-                        // Remove newly downed peer
-                        if state.node_id_ip_dict.remove(&node_id).is_some() {
-                            let _ = self
-                                .set_node_id_ip_dict(state.node_id_ip_dict.clone())
-                                .await;
-                        }
-
-                        // If leader, inform everyone via state_message
-                        // if leader down, elect self as leader and inform everyone via state_message (last one wins, fine for now #TODO)
-                        if let Some(leader) = state.leader {
-                            if leader == self.node_id {
-                                let _ = self.send_state_message(state).await;
-                            } else if leader == node_id {
-                                state.leader = Some(self.node_id);
-                                let _ = self.send_state_message(state).await;
-                                let _ = self.set_leader(self.node_id).await;
-                            }
-                        } else {
-                            // no leader set, elect self as leader and inform everyone via state_message (last one wins, fine for now #TODO)
-                            state.leader = Some(self.node_id);
-                            let _ = self.send_state_message(state).await;
-                            let _ = self.set_leader(self.node_id).await;
-                        }
-                    }
-                }
-                iroh_gossip::api::Event::NeighborUp(node_id) => {
-                    if let Some(mut state) = self.get_state().await.ok() {
-                        if let Some(leader) = state.leader {
-                            if leader == self.node_id
-                                && !state.node_id_ip_dict.contains_key(&node_id)
-                            {
-                                if let Ok(next_ip) = self.get_next_ip().await {
-                                    state.node_id_ip_dict.insert(node_id, next_ip);
-                                    let _ = self
-                                        .set_node_id_ip_dict(state.node_id_ip_dict.clone())
-                                        .await;
-                                    let _ = self.send_state_message(state.clone()).await;
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => (),
-            }
-        }
-
-        //println!("Failed!!!!");
-        Ok(())
-    }
-
-    async fn send_state_message(&self, state: RouterState) -> Result<()> {
-        let msg = RouterMessage::StateMessage(StateMessage {
-            node_id_ip_dict: state.node_id_ip_dict,
-            timestamp: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or(Duration::from_secs(0))
-                .as_secs() as i64,
-            leader: state.leader,
-        });
-        let data = postcard::to_stdvec(&msg).expect("serialization failed");
-        self.gossip_sender.broadcast(data).await
-    }
-
-    async fn get_next_ip(&self) -> Result<Ipv4Addr> {
-        let state = self.get_state().await?;
-        let &highest_ip = state
-            .node_id_ip_dict
-            .values()
-            .max_by_key(|&ip| ip.octets()[2] as u16 * 256u16 + ip.octets()[3] as u16)
-            .unwrap_or(&Ipv4Addr::new(172, 22, 0, 3));
-
-        let next_ip = Ipv4Addr::new(
-            172,
-            22,
-            if highest_ip.octets()[3] == 255 { 1 } else { 0 } + highest_ip.octets()[2],
-            if highest_ip.octets()[3] == 255 {
-                0
-            } else {
-                highest_ip.octets()[3] + 1
-            },
-        );
-
-        // to avoid overflow and therfore dublicates we check if this ip is already contained
-        if state.node_id_ip_dict.values().any(|v| v.eq(&next_ip)) {
-            return Err(anyhow::anyhow!("invalid ip"));
-        }
-
-        Ok(next_ip)
-    }
-
-    async fn set_last_leader_msg(&self, latest_leader_msg: StateMessage) -> Result<()> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.router_requester
-            .send(RouterRequest::SetLastLeaderMsg(latest_leader_msg, tx))
-            .await?;
-        rx.await?;
-        Ok(())
-    }
-
-    async fn set_leader(&self, leader: NodeId) -> Result<()> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.router_requester
-            .send(RouterRequest::SetLeader(leader, tx))
-            .await?;
-        rx.await?;
-        Ok(())
-    }
-
-    async fn set_node_id_ip_dict(&self, node_id_ip_dict: HashMap<NodeId, Ipv4Addr>) -> Result<()> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.router_requester
-            .send(RouterRequest::SetNodeIdIpDict(node_id_ip_dict, tx))
-            .await?;
-        rx.await?;
-        Ok(())
-    }
-
-    pub async fn get_state(&self) -> Result<RouterState> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.router_requester
-            .send(RouterRequest::GetRouterState(tx))
-            .await?;
-        Ok(rx.await?)
-    }
-
-    // Returns the NodeId of the destination ipv4
-    pub async fn ip_to_node_id(&self, pkg: Ipv4Pkg) -> Result<NodeId> {
-        let pkg = pkg.to_ipv4_packet()?;
-        let dest = pkg.get_destination();
-
-        let state = self.get_state().await?;
-        let (dest_node_id, _) = state
-            .node_id_ip_dict
-            .iter()
-            .filter(|(_, ip)| ip.octets() == dest.octets())
-            .next()
-            .context("")?;
-
-        Ok(*dest_node_id)
-    }
-
-    pub async fn node_id_to_ip(&self, node_id: NodeId) -> Result<Ipv4Addr> {
-        let state = self.get_state().await?;
-        let ip = state
-            .node_id_ip_dict
-            .get(&node_id)
-            .context("node id not found")?;
-        Ok(*ip)
-    }
-
-    pub fn subscribe_direct_connect(&self) -> tokio::sync::broadcast::Receiver<DirectMessage> {
-        self.direct_connect_sender.subscribe()
-    }
-
-    pub fn my_node_id(&self) -> NodeId {
-        self.node_id
-    }
-
-    pub async fn my_ip(&self) -> Option<Ipv4Addr> {
-        if let Ok(ip) = self.node_id_to_ip(self.my_node_id()).await {
-            Some(ip)
-        } else {
-            if let Ok(data) = postcard::to_stdvec(&RouterMessage::ReqMessage(ReqMessage {
-                node_id: self.node_id,
-            })) {
-                let _ = self.gossip_sender.broadcast(data).await;
-            }
-            None
-        }
-    }
-
-    pub async fn get_leader(&self) -> Result<Option<NodeId>> {
-        let state = self.get_state().await?;
-        Ok(state.leader)
+    pub async fn get_node_id_from_ip(&self, ip: Ipv4Addr) -> Result<NodeId> {
+        self.api
+            .call(move |actor| Box::pin(actor.get_node_id_from_ip(ip)))
+            .await
     }
 }
 
 impl Actor for RouterActor {
     async fn run(&mut self) -> Result<()> {
+        let mut ip_tick = tokio::time::interval(Duration::from_millis(500));
+        ip_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
                 Some(action) = self.rx.recv() => {
@@ -342,6 +244,13 @@ impl Actor for RouterActor {
                 }
                 _ = tokio::signal::ctrl_c() => {
                     break
+                }
+
+                // advance ip state machine
+                _ = ip_tick.tick(), if !matches!(self.my_ip, RouterIp::AssignedIp(_)) => {
+                    if let Ok(true) = self.advance_ip_state().await {
+                        info!("Acquired IP: {:?}", self.my_ip);
+                    }
                 }
             }
         }
@@ -351,6 +260,12 @@ impl Actor for RouterActor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct IpAssignment {
+    ip: Ipv4Addr,
+    node_id: NodeId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct IpCandidate {
     ip: Ipv4Addr,
     node_id: NodeId,
@@ -364,26 +279,96 @@ async fn entry_to_value<S: for<'a> Deserialize<'a>>(
     postcard::from_bytes::<S>(&b).context("failed to deserialize value")
 }
 
-fn key_ip_assigned(ip: Ipv4Addr) -> impl Into<Query> {
+fn query(q: impl Into<String>) -> impl Into<Query> {
     QueryBuilder::<SingleLatestPerKeyQuery>::default()
-        .key_exact(format!("/assigned/ip/{}", ip))
+        .key_exact(q.into())
         .build()
 }
 
-fn key_prefix_ip_candidates(ip: Ipv4Addr) -> impl Into<Query> {
-    QueryBuilder::<FlatQuery>::default()
-        .key_exact(format!("/candidates/ip/{ip}"))
-        .build()
+fn key_ip_assigned(ip: Ipv4Addr) -> String {
+    format!("/assigned/ip/{}", ip)
+}
+
+fn key_ip_assigned_prefix() -> String {
+    "/assigned/ip/".to_string()
+}
+
+fn key_ip_candidate(ip: Ipv4Addr, node_id: NodeId) -> String {
+    format!("/candidates/ip/{}/{}", ip, node_id)
+}
+
+fn key_ip_candidate_prefix() -> String {
+    format!("/candidates/ip/")
+}
+
+fn key_prefix_ip_candidates(ip: Ipv4Addr) -> String {
+    format!("/candidates/ip/{ip}")
 }
 
 impl RouterActor {
-    // Assigned IPs
+    async fn read_all_ip_assignments(&mut self) -> Result<Vec<IpAssignment>> {
+        let entries = self
+            .doc
+            .get_many(query(key_ip_assigned_prefix()))
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .iter()
+            .filter_map(|entry| {
+                if let Ok(entry) = entry {
+                    Some(entry)
+                } else {
+                    None
+                }
+            })
+            .cloned()
+            .collect::<Vec<_>>();
 
-    async fn read_ip_assignment(&mut self, ip: Ipv4Addr) -> Result<NodeId> {
-        postcard::from_bytes::<NodeId>(
+        let mut assignments = Vec::new();
+        for entry in entries {
+            if let Ok(assignment) = entry_to_value::<IpAssignment>(self.blobs.clone(), &entry).await
+            {
+                assignments.push(assignment);
+            }
+        }
+
+        Ok(assignments)
+    }
+
+    async fn read_all_ip_candidates(&mut self) -> Result<Vec<IpCandidate>> {
+        let entries = self
+            .doc
+            .get_many(query(key_ip_candidate_prefix()))
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .iter()
+            .filter_map(|entry| {
+                if let Ok(entry) = entry {
+                    Some(entry)
+                } else {
+                    None
+                }
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut candidates = Vec::new();
+        for entry in entries {
+            if let Ok(candidate) = entry_to_value::<IpCandidate>(self.blobs.clone(), &entry).await {
+                candidates.push(candidate);
+            }
+        }
+
+        Ok(candidates)
+    }
+
+    // Assigned IPs
+    async fn read_ip_assignment(&mut self, ip: Ipv4Addr) -> Result<IpAssignment> {
+        postcard::from_bytes::<IpAssignment>(
             &self
                 .doc
-                .get_one(key_ip_assigned(ip))
+                .get_one(query(key_ip_assigned(ip)))
                 .await?
                 .context("no assignment found")?
                 .to_vec(),
@@ -392,11 +377,10 @@ impl RouterActor {
     }
 
     // Candidate IPs
-
     async fn read_ip_candidates(&mut self, ip: Ipv4Addr) -> Result<Vec<IpCandidate>> {
         let entries = self
             .doc
-            .get_many(key_prefix_ip_candidates(ip))
+            .get_many(query(key_prefix_ip_candidates(ip)))
             .await?
             .collect::<Vec<_>>()
             .await;
@@ -416,7 +400,150 @@ impl RouterActor {
     }
 
     // write ip assigned
+    async fn write_ip_assignment(&mut self, ip: Ipv4Addr, node_id: NodeId) -> Result<()> {
+        if self.read_ip_assignment(ip).await.is_ok() {
+            anyhow::bail!("ip already assigned");
+        }
+
+        // check for multiple candidates
+        let mut candidates = self.read_ip_candidates(ip).await?;
+        if candidates.is_empty() {
+            bail!("no candidates for this ip");
+        }
+
+        candidates.sort_by_key(|c| {
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(c.node_id.as_bytes());
+            hasher.update(ip.to_string().as_bytes());
+            hasher.finalize()
+        });
+
+        if candidates[0].node_id != node_id {
+            bail!("not the chosen candidate");
+        }
+
+        // We are the chosen one!
+        // 1. write our ip assignment
+        // 2. delete all candidates for this ip
+        let data = postcard::to_stdvec(&IpAssignment { ip, node_id })?;
+        self.doc
+            .set_bytes(self.author_id, key_ip_assigned(ip), data)
+            .await?;
+
+        let _ = self
+            .doc
+            .del(self.author_id, key_prefix_ip_candidates(ip))
+            .await;
+
+        Ok(())
+    }
+
     // write ip candidate
-    // delete ip candidates all
-    
+async fn write_ip_candidate(&mut self, ip: Ipv4Addr, node_id: NodeId) -> Result<IpCandidate> {
+        // already assigned? don't write
+        if self.read_ip_assignment(ip).await.is_ok() {
+            anyhow::bail!("ip already assigned");
+        }
+
+        // read existing candidates; Ok(vec![]) when none exist
+        let candidates = self.read_ip_candidates(ip).await.unwrap_or_default();
+
+        // if someone else is already a candidate, treat as contested and skip writing
+        if candidates.iter().any(|c| c.node_id != node_id) {
+            anyhow::bail!("ip candidate already exists");
+        }
+
+        // idempotent for our own node_id
+        let candidate = IpCandidate { ip, node_id };
+        let data = postcard::to_stdvec(&candidate)?;
+        self.doc
+            .set_bytes(self.author_id, key_ip_candidate(ip, node_id), data)
+            .await?;
+        Ok(candidate)
+    }
+
+    async fn get_node_id_from_ip(&mut self, ip: Ipv4Addr) -> Result<NodeId> {
+        self.read_all_ip_assignments()
+            .await?
+            .iter()
+            .find(|assignment| assignment.ip == ip)
+            .map(|a| a.node_id)
+            .ok_or_else(|| anyhow::anyhow!("no node id found for ip"))
+    }
+
+    async fn get_ip_from_node_id(&mut self, node_id: NodeId) -> Result<Ipv4Addr> {
+        self.read_all_ip_assignments()
+            .await?
+            .iter()
+            .find(|assignment| assignment.node_id == node_id)
+            .map(|a| a.ip)
+            .ok_or_else(|| anyhow::anyhow!("no ip found for node id"))
+    }
+}
+
+impl RouterActor {
+    async fn advance_ip_state(&mut self) -> Result<bool> {
+        match self.my_ip.clone() {
+            RouterIp::NoIp => {
+                let next_ip = self.get_next_ip().await?;
+                self.my_ip = RouterIp::AquiringIp(
+                    self.write_ip_candidate(next_ip, self.node_id).await?,
+                    tokio::time::Instant::now(),
+                );
+                Ok(false)
+            }
+            RouterIp::AquiringIp(ip_candidate, start_time) => {
+                if start_time.elapsed() > Duration::from_secs(5) {
+                    if self
+                        .write_ip_assignment(ip_candidate.ip, ip_candidate.node_id)
+                        .await
+                        .is_ok()
+                    {
+                        self.my_ip = RouterIp::AssignedIp(ip_candidate.ip);
+                    } else {
+                        self.my_ip = RouterIp::NoIp;
+                    }
+                }
+                Ok(false)
+            }
+            _ => Ok(true),
+        }
+    }
+
+    async fn get_next_ip(&mut self) -> Result<Ipv4Addr> {
+        let all_assigned = self.read_all_ip_assignments().await?;
+        let all_candidates = self.read_all_ip_candidates().await?;
+
+        let all_ips = all_assigned
+            .iter()
+            .map(|assigned| assigned.ip)
+            .chain(all_candidates.iter().map(|candidate| candidate.ip))
+            .collect::<Vec<_>>();
+
+        let highest_ip = if all_ips.is_empty() {
+            Ipv4Addr::new(172, 22, 0, 2)
+        } else {
+            *all_ips
+                .iter()
+                .max_by_key(|&&ip| ip.octets()[2] as u16 * 256u16 + ip.octets()[3] as u16)
+                .expect("no ips found")
+        };
+
+        let next_ip = Ipv4Addr::new(
+            172,
+            22,
+            if highest_ip.octets()[3] == 255 { 1 } else { 0 } + highest_ip.octets()[2],
+            if highest_ip.octets()[3] == 255 {
+                0
+            } else {
+                highest_ip.octets()[3] + 1
+            },
+        );
+
+        // to avoid overflow and therefore duplicates we check if this ip is already contained
+        if all_ips.contains(&next_ip) {
+            bail!("no more ips available");
+        }
+        Ok(next_ip)
+    }
 }

@@ -2155,6 +2155,8 @@ dependencies = [
  "serde",
  "sha2",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "tun-rs",
  "z32",
 ]

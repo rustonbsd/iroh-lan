@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 use std::collections::{HashMap, hash_map::Entry};
 
 use iroh::{NodeId, endpoint::Connection, protocol::ProtocolHandler};
@@ -26,6 +27,7 @@ struct DirectActor {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum DirectMessage {
     IpPacket(Ipv4Pkg),
+    IDontLikeWarnings,
 }
 
 impl Direct {
@@ -120,10 +122,11 @@ impl DirectActor {
         match self.peers.entry(to) {
             Entry::Occupied(entry) => {
                 if entry.get().get_state().await == crate::connection::ConnState::Closed {
-                    println!("Connection to peer {} closed, removing", to);
+                    debug!("Connection to peer {} closed, removing", to);
                     entry.remove();
                     return Err(anyhow::anyhow!("connection to peer is not running"));
                 }
+
                 entry.get().write(pkg).await?;
             }
             Entry::Vacant(entry) => {
