@@ -1,3 +1,4 @@
+
 use std::{boxed, future::Future, pin::Pin};
 
 use anyhow::anyhow;
@@ -8,46 +9,62 @@ pub type PreBoxActorFut<'a, T> = dyn Future<Output = T> + Send + 'a;
 pub type ActorFut<'a, T> = Pin<boxed::Box<PreBoxActorFut<'a, T>>>;
 pub type Action<A> = Box<dyn for<'a> FnOnce(&'a mut A) -> ActorFut<'a, ()> + Send + 'static>;
 
-// Ergonomic helper to avoid writing Box::pin(...) at call sites
-pub trait IntoActorFut<'a, T>: Sized {
-    fn into_actor_fut(self) -> ActorFut<'a, T>;
+pub fn into_actor_fut_res<'a, Fut, T>(
+    fut: Fut,
+) -> ActorFut<'a, anyhow::Result<T>>
+where
+    Fut: Future<Output = anyhow::Result<T>> + Send + 'a,
+    T: Send + 'a,
+{
+    Box::pin(fut)
 }
-impl<'a, T, Fut> IntoActorFut<'a, T> for Fut
+
+pub fn into_actor_fut_ok<'a, Fut, T>(
+    fut: Fut,
+) -> ActorFut<'a, anyhow::Result<T>>
 where
     Fut: Future<Output = T> + Send + 'a,
+    T: Send + 'a,
 {
-    fn into_actor_fut(self) -> ActorFut<'a, T> {
-        Box::pin(self)
-    }
+    Box::pin(async move { Ok::<T, anyhow::Error>(fut.await) })
+}
+
+pub fn into_actor_fut_unit_ok<'a, Fut>(
+    fut: Fut,
+) -> ActorFut<'a, anyhow::Result<()>>
+where
+    Fut: Future<Output = ()> + Send + 'a,
+{
+    Box::pin(async move {
+        fut.await;
+        Ok::<(), anyhow::Error>(())
+    })
 }
 
 #[macro_export]
 macro_rules! act {
-    ($actor:ident => $expr:expr) => {{ move |$actor| $crate::actor::box_fut(($expr)) }};
-}
+    // takes single expression that yields Result<T, anyhow::Error>
+    ($actor:ident => $expr:expr) => {{
+        move |$actor| $crate::actor::into_actor_fut_res(($expr))
+    }};
 
-#[macro_export]
-macro_rules! act_async {
+    // takes a block that yields Result<T, anyhow::Error> and can use ?
     ($actor:ident => $body:block) => {{
-        move |$actor| $crate::actor::box_fut(async move $body)
+        move |$actor| $crate::actor::into_actor_fut_res($body)
     }};
 }
 
 #[macro_export]
-
-macro_rules! act_async_ok {
-    ($actor:ident => $body:block) => {{ move |$actor| $crate::actor::box_fut(async move { Ok::<_, anyhow::Error>($body) }) }};
-}
-
-#[macro_export]
 macro_rules! act_ok {
+    // takes single expression that yields T
     ($actor:ident => $expr:expr) => {{
-        move |$actor| {
-            $crate::actor::box_fut(async move {
-                $expr;
-                Ok(())
-            })
-        }
+        move |$actor| $crate::actor::into_actor_fut_ok(($expr))
+    }};
+
+    // For call() with a block that returns T (no ?), we map to Ok(T)
+    // takes a block that yields T (no = u)
+    ($actor:ident => $body:block) => {{
+        move |$actor| $crate::actor::into_actor_fut_ok($body)
     }};
 }
 
@@ -123,38 +140,5 @@ where
 
         rrx.await
             .map_err(|_| anyhow!("actor stopped (call recv at {}:{})", loc.file(), loc.line()))?
-    }
-
-    pub async fn cast<Fut, F>(&self, f: F) -> anyhow::Result<()>
-    where
-        F: for<'a> FnOnce(&'a mut A) -> ActorFut<'a, anyhow::Result<()>> + Send + 'static,
-    {
-        let loc = std::panic::Location::caller();
-
-        self.tx
-            .send(Box::new(move |actor: &mut A| {
-                Box::pin(async move {
-                    if let Err(p) = std::panic::AssertUnwindSafe(async move { f(actor).await })
-                        .catch_unwind()
-                        .await
-                    {
-                        let msg = if let Some(s) = p.downcast_ref::<&str>() {
-                            (*s).to_string()
-                        } else if let Some(s) = p.downcast_ref::<String>() {
-                            s.clone()
-                        } else {
-                            "unknown panic".to_string()
-                        };
-                        eprintln!(
-                            "panic in actor cast at {}:{}: {}",
-                            loc.file(),
-                            loc.line(),
-                            msg
-                        );
-                    }
-                })
-            }))
-            .await
-            .map_err(|_| anyhow!("actor stopped (cast at {}:{})", loc.file(), loc.line()))
     }
 }

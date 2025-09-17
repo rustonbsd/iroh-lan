@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, net::Ipv4Addr};
 use tun_rs::{AsyncDevice, DeviceBuilder, Layer};
 
-use crate::{act, act_async, actor::{Action, Handle}};
+use crate::{act, actor::{Action, Handle}};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Ipv4Pkg(Vec<u8>);

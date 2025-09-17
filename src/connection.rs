@@ -4,7 +4,8 @@ use std::{
 };
 
 use crate::{
-    act, act_async_ok, act_ok, actor::{Action, Actor, Handle}, DirectMessage
+    DirectMessage, act, act_ok,
+    actor::{Action, Actor, Handle},
 };
 use anyhow::Result;
 use iroh::{
@@ -123,7 +124,9 @@ impl Conn {
     pub async fn get_state(&self) -> ConnState {
         if let Ok(state) = self
             .api
-            .call(move |actor| Box::pin(async { Ok(actor.get_state()) }))
+            .call(act_ok!(actor => async move {
+                actor.state.clone()
+            }))
             .await
         {
             state
@@ -178,7 +181,7 @@ impl Actor for ConnActor {
                     }
                 }
                 _ = notification_ticker.tick(), if self.state != ConnState::Closed
-                        && (!self.sender_queue.is_empty() 
+                        && (!self.sender_queue.is_empty()
                             || self.receiver_queue.is_empty()) => {
                     if !self.sender_queue.is_empty() {
                         self.sender_notify.notify_one();
@@ -254,10 +257,6 @@ impl ConnActor {
             reconnect_backoff: 1,
             conn_node_id,
         }
-    }
-
-    pub fn get_state(&self) -> ConnState {
-        self.state
     }
 
     pub fn set_state(&mut self, state: ConnState) {
