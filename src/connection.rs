@@ -4,8 +4,7 @@ use std::{
 };
 
 use crate::{
-    DirectMessage,
-    actor::{Action, Actor, Handle},
+    act, act_async_ok, act_ok, actor::{Action, Actor, Handle}, DirectMessage
 };
 use anyhow::Result;
 use iroh::{
@@ -134,16 +133,16 @@ impl Conn {
     }
 
     pub async fn close(&self) -> Result<()> {
-        self.api.cast(move |actor| Box::pin(actor.close())).await
+        self.api.call(act_ok!(actor => actor.close())).await
     }
 
     pub async fn write(&self, pkg: DirectMessage) -> Result<()> {
-        self.api.cast(move |actor| Box::pin(actor.write(pkg))).await
+        self.api.call(act_ok!(actor => actor.write(pkg))).await
     }
 
     pub async fn incoming_connection(&self, conn: Connection, accept_not_open: bool) -> Result<()> {
         self.api
-            .call(move |actor| Box::pin(actor.incoming_connection(conn, accept_not_open)))
+            .call(act!(actor => actor.incoming_connection(conn, accept_not_open)))
             .await
     }
 }

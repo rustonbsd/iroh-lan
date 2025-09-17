@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use tracing::{info, warn};
 
-use crate::actor::{Actor, Handle};
+use crate::{act, act_async, act_async_ok, act_ok, actor::{Actor, Handle}};
 
 #[derive(Debug, Clone)]
 pub struct Builder {
@@ -214,20 +214,20 @@ impl Router {
     }
 
     pub async fn get_ip_state(&self) -> Result<RouterIp> {
-        self.api
-            .call(move |actor| Box::pin(async { Ok(actor.my_ip.clone()) }))
-            .await
+        self.api.call(act_async_ok!(actor => {
+            actor.my_ip.clone()
+        })).await
     }
 
     pub async fn get_ip_from_node_id(&self, node_id: NodeId) -> Result<Ipv4Addr> {
         self.api
-            .call(move |actor| Box::pin(actor.get_ip_from_node_id(node_id)))
+            .call(act!(actor => actor.get_ip_from_node_id(node_id)))
             .await
     }
 
     pub async fn get_node_id_from_ip(&self, ip: Ipv4Addr) -> Result<NodeId> {
         self.api
-            .call(move |actor| Box::pin(actor.get_node_id_from_ip(ip)))
+            .call(act!(actor => actor.get_node_id_from_ip(ip)))
             .await
     }
 }
