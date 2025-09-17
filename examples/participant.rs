@@ -18,8 +18,13 @@ async fn main() -> anyhow::Result<()> {
     let network = Network::new("test1", "<password>").await?;
 
     tokio::spawn(async move {
-        println!("Network started with node ID {:?}", network.get_router_state().await);
-        sleep(std::time::Duration::from_secs(5)).await;
+        loop {
+            println!(
+                "Network started with node ID {:?}",
+                network.get_router_state().await
+            );
+            sleep(std::time::Duration::from_secs(5)).await;
+        }
     });
 
     loop {
@@ -29,7 +34,6 @@ async fn main() -> anyhow::Result<()> {
                 break Ok(())
             }
         }
-    
     }
     //Ok(())
 }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, net::Ipv4Addr};
 use tun_rs::{AsyncDevice, DeviceBuilder, Layer};
 
-use crate::actor::{Action, Handle};
+use crate::{act, act_async, actor::{Action, Handle}};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Ipv4Pkg(Vec<u8>);
@@ -88,25 +88,21 @@ impl Tun {
 
     pub async fn write(&self, pkg: Ipv4Pkg) -> Result<()> {
         self.api
-            .cast(move |actor| {
-                Box::pin(async move {
-                    let _ = actor.write_to_tun(pkg).await;
-                })
-            })
+            .call(act!(actor => actor.write_to_tun(pkg)))
             .await
     }
 
     pub async fn subscribe(&self) -> Result<tokio::sync::broadcast::Receiver<Ipv4Pkg>> {
         self.api
-            .call(move |actor| Box::pin(actor.subscribe()))
+            .call(act!(actor => actor.subscribe()))
             .await
     }
 
     pub async fn close(&self) -> Result<()> {
         self.api
-            .cast(move |actor| Box::pin(async move {
-                let _ = actor.close().await;
-            }))
+            .call(act!(actor => 
+                actor.close()
+            ))
             .await
     }
     

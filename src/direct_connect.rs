@@ -6,9 +6,7 @@ use std::collections::{HashMap, hash_map::Entry};
 use iroh::{NodeId, endpoint::Connection, protocol::ProtocolHandler};
 
 use crate::{
-    actor::{Action, Handle},
-    connection::Conn,
-    local_networking::Ipv4Pkg,
+    act, actor::{Action, Handle}, connection::Conn, local_networking::Ipv4Pkg
 };
 
 #[derive(Debug, Clone)]
@@ -59,16 +57,16 @@ impl Direct {
 
     pub async fn kick_peer(&self, node_id: NodeId) -> Result<()> {
         self.api
-            .cast(move |actor| Box::pin(async move { let _ = actor.kick_peer(node_id).await; }))
+            .call(act!(actor => actor.kick_peer(node_id)))
             .await
     }
 
     pub async fn get_endpoint(&self) -> iroh::endpoint::Endpoint {
-        self.api.call(|actor| Box::pin(actor.get_endpoint())).await.unwrap()
+        self.api.call(act!(actor => actor.get_endpoint())).await.unwrap()
     }
 
     pub async fn close(&self) -> Result<()> {
-        self.api.call(|actor| Box::pin(actor.close())).await
+        self.api.call(act!(actor => actor.close())).await
     }
 }
 

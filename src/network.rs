@@ -7,7 +7,7 @@ use iroh_docs::protocol::Docs;
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
 
 use crate::{
-    actor::{Action, Actor, Handle}, local_networking::Ipv4Pkg, router::RouterIp, Direct, DirectMessage, Router, Tun
+    act, actor::{Action, Actor, Handle}, actor_impr::{box_fut, IntoActorFut}, local_networking::Ipv4Pkg, router::RouterIp, Direct, DirectMessage, Router, Tun
 };
 
 #[derive(Debug, Clone)]
@@ -24,12 +24,11 @@ struct NetworkActor {
 
     _router: iroh::protocol::Router,
     _endpoint: iroh::endpoint::Endpoint,
-    
+
     tun: Option<Tun>,
-    
+
     _local_to_direct_tx: tokio::sync::broadcast::Sender<Ipv4Pkg>,
     local_to_direct_rx: tokio::sync::broadcast::Receiver<Ipv4Pkg>,
-
 
     _direct_to_local_tx: tokio::sync::broadcast::Sender<DirectMessage>,
     direct_to_local_rx: tokio::sync::broadcast::Receiver<DirectMessage>,
@@ -108,14 +107,13 @@ impl Network {
 
     pub async fn get_router_state(&self) -> Result<RouterIp> {
         self.api
-            .call(move |actor| Box::pin(actor.router.get_ip_state()))
+            .call(act!(actor => actor.router.get_ip_state()))
             .await
     }
 }
 
 impl Actor for NetworkActor {
     async fn run(&mut self) -> Result<()> {
-
         let mut ip_tick = tokio::time::interval(Duration::from_millis(500));
         ip_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
