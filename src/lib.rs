@@ -4,7 +4,7 @@ mod local_networking;
 mod router;
 mod direct_connect;
 mod connection;
-pub mod standalone;
+pub mod network;
 
 pub mod actor;
 

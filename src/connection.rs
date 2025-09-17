@@ -1,6 +1,5 @@
 use std::{
     collections::VecDeque,
-    pin::Pin,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -9,16 +8,16 @@ use crate::{
     actor::{Action, Actor, Handle},
 };
 use anyhow::Result;
-use futures::FutureExt;
 use iroh::{
     Endpoint,
-    endpoint::{ClosedStream, RecvStream, SendStream, StoppedError},
+    endpoint::{RecvStream, SendStream},
 };
 use iroh::{
     NodeId,
     endpoint::{Connection, VarInt},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing::debug;
 
 const QUEUE_SIZE: usize = 1024 * 16;
 const MAX_RECONNECTS: u64 = 5;
@@ -306,7 +305,7 @@ impl ConnActor {
         self.reconnect_backoff = 1;
 
         // SHOULD NOT CHANGE but just for sanity
-        self.conn_node_id = self.conn.clone().expect("new_conn").remote_node_id()?;
+        //self.conn_node_id = self.conn.clone().expect("new_conn").remote_node_id()?;
 
         Ok(())
     }
@@ -352,8 +351,8 @@ impl ConnActor {
 
     async fn remote_write_next(&mut self) -> Result<()> {
         let start = SystemTime::now();
+        let mut wrote = 0;
         if let Some(send_stream) = &mut self.send_stream {
-            let mut wrote = 0;
             while let Some(msg) = self.sender_queue.back() {
                 let bytes = postcard::to_stdvec(msg)?;
                 send_stream.write_u32_le(bytes.len() as u32).await?;
@@ -374,7 +373,7 @@ impl ConnActor {
 
         let end = SystemTime::now();
         let duration = end.duration_since(start).unwrap();
-        //println!("write_remote: {wrote}; elapsed: {}", duration.as_millis());
+        debug!("write_remote: {wrote}; elapsed: {}", duration.as_millis());
         Ok(())
     }
 
@@ -395,7 +394,7 @@ impl ConnActor {
                             self.receiver_notify.notify_one();
                             let end = SystemTime::now();
                             let duration = end.duration_since(start).unwrap();
-                            //println!("read_remote: elapsed: {}", duration.as_millis());
+                            debug!("read_remote: elapsed: {}", duration.as_millis());
                             Ok(msg)
                         } else {
                             Err(anyhow::anyhow!("failed to convert to IPv4 packet"))
