@@ -3,9 +3,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use actor_helper::{act, act_ok, Action, Actor, Handle};
 use crate::{
-    DirectMessage, act, act_ok,
-    actor::{Action, Actor, Handle},
+    DirectMessage,
 };
 use anyhow::Result;
 use iroh::{

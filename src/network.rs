@@ -1,13 +1,14 @@
 use std::time::Duration;
 
+use actor_helper::{act, Action, Actor, Handle};
 use anyhow::Result;
 use iroh::{Endpoint, SecretKey};
 use iroh_blobs::store::mem::MemStore;
 use iroh_docs::protocol::Docs;
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
 
-use crate::{
-    act, actor::{Action, Actor, Handle}, local_networking::Ipv4Pkg, router::RouterIp, Direct, DirectMessage, Router, Tun
+use crate::{ 
+    local_networking::Ipv4Pkg, router::RouterIp, Direct, DirectMessage, Router, Tun
 };
 
 #[derive(Debug, Clone)]

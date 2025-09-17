@@ -20,9 +20,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use tracing::{info, warn};
 
-use crate::{
-    act, act_ok,
-    actor::{Actor, Handle},
+use actor_helper::{
+    act, act_ok, Action, Actor, Handle
 };
 
 #[derive(Debug, Clone)]
@@ -183,7 +182,7 @@ impl Default for Builder {
 
 #[derive(Debug, Clone)]
 pub struct Router {
-    api: crate::actor::Handle<RouterActor>,
+    api: Handle<RouterActor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,7 +194,7 @@ pub enum RouterIp {
 
 #[derive(Debug)]
 struct RouterActor {
-    pub(crate) rx: tokio::sync::mpsc::Receiver<crate::actor::Action<RouterActor>>,
+    pub(crate) rx: tokio::sync::mpsc::Receiver<Action<RouterActor>>,
 
     pub gossip_sender: GossipSender,
     pub gossip_receiver: GossipReceiver,
