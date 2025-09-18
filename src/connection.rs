@@ -126,7 +126,7 @@ impl Conn {
         if let Ok(state) = self
             .api
             .call(act_ok!(actor => async move {
-                actor.state.clone()
+                actor.state
             }))
             .await
         {
@@ -198,7 +198,7 @@ impl Actor for ConnActor {
                     }
                 }
                 _ = self.sender_notify.notified(), if self.conn.is_some() && self.state == ConnState::Open => {
-                    while self.sender_queue.len() > 0 {
+                    while !self.sender_queue.is_empty() {
                         if self.remote_write_next().await.is_err() {
                             warn!("Failed to write to remote, will attempt to reconnect");
                             self.set_state(ConnState::Disconnected);
@@ -226,6 +226,7 @@ impl Actor for ConnActor {
 }
 
 impl ConnActor {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         rx: tokio::sync::mpsc::Receiver<Action<ConnActor>>,
         self_handle: Handle<ConnActor>,
@@ -246,9 +247,9 @@ impl ConnActor {
             external_sender,
             receiver_queue: VecDeque::with_capacity(QUEUE_SIZE),
             sender_queue: VecDeque::with_capacity(QUEUE_SIZE),
-            conn: conn,
-            send_stream: send_stream,
-            recv_stream: recv_stream,
+            conn,
+            send_stream,
+            recv_stream,
             endpoint,
             receiver_notify: tokio::sync::Notify::new(),
             sender_notify: tokio::sync::Notify::new(),
@@ -275,7 +276,7 @@ impl ConnActor {
     }
 
     pub async fn write(&mut self, pkg: DirectMessage) {
-        let _ = self.sender_queue.push_front(pkg);
+        self.sender_queue.push_front(pkg);
         self.sender_notify.notify_one();
     }
 
@@ -395,7 +396,7 @@ impl ConnActor {
                 Err(anyhow::anyhow!("failed to deserialize message"))
             }
         } else {
-            return Err(anyhow::anyhow!("no recv stream"));
+            Err(anyhow::anyhow!("no recv stream"))
         }
     }
 }

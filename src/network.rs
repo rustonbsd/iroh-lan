@@ -89,8 +89,8 @@ impl Network {
             let (to_remote_writer, to_remote_reader) = tokio::sync::broadcast::channel(1024 * 16);
             let mut actor = NetworkActor {
                 rx,
-                router: router,
-                direct: direct,
+                router,
+                direct,
 
                 _router,
                 _endpoint: endpoint,

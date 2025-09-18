@@ -1,4 +1,3 @@
-use core::sync;
 use std::{net::Ipv4Addr, time::Duration};
 
 use distributed_topic_tracker::{
@@ -132,7 +131,7 @@ impl Builder {
             .neighbors()
             .await
             .iter()
-            .map(|pub_key| NodeAddr::new(pub_key.clone()))
+            .map(|pub_key| NodeAddr::new(*pub_key))
             .collect::<Vec<_>>();
 
         debug!("[Doc peers]: {:?}", doc_peers);
@@ -156,8 +155,8 @@ impl Builder {
         let (api, rx) = Handle::<crate::router::RouterActor>::channel(1024 * 16);
         tokio::spawn(async move {
             let mut router_actor = RouterActor {
-                gossip_sender,
-                gossip_receiver,
+                _gossip_sender: gossip_sender,
+                _gossip_receiver: gossip_receiver,
                 author_id,
                 _docs: docs,
                 doc,
@@ -205,8 +204,8 @@ pub enum RouterIp {
 struct RouterActor {
     pub(crate) rx: tokio::sync::mpsc::Receiver<Action<RouterActor>>,
 
-    pub gossip_sender: GossipSender,
-    pub gossip_receiver: GossipReceiver,
+    pub _gossip_sender: GossipSender,
+    pub _gossip_receiver: GossipReceiver,
 
     pub(crate) blobs: MemStore,
     pub(crate) _docs: Docs,
@@ -256,7 +255,7 @@ impl Router {
             let mut peers = vec![];
             let sync_peers = actor.doc.get_sync_peers().await?;
             for pub_key in sync_peers.iter() {
-                let node_id = iroh::PublicKey::from_bytes(&pub_key.clone().as_slice()[0])?.into();
+                let node_id = iroh::PublicKey::from_bytes(&pub_key.clone().as_slice()[0])?;
                 let ip = actor.get_ip_from_node_id(node_id).await.ok();
                 peers.push((node_id, ip));
             }
@@ -325,7 +324,7 @@ fn query_prefix(q: impl Into<String>) -> impl Into<Query> {
 }
 
 fn key_ip_assigned(ip: Ipv4Addr) -> String {
-    format!("/assigned/ip/{}", ip)
+    format!("/assigned/ip/{ip}")
 }
 
 fn key_ip_assigned_prefix() -> String {
@@ -333,11 +332,11 @@ fn key_ip_assigned_prefix() -> String {
 }
 
 fn key_ip_candidate(ip: Ipv4Addr, node_id: NodeId) -> String {
-    format!("/candidates/ip/{}/{}", ip, node_id)
+    format!("/candidates/ip/{ip}/{node_id}")
 }
 
 fn key_ip_candidate_prefix() -> String {
-    format!("/candidates/ip/")
+    "/candidates/ip/".to_string()
 }
 
 fn key_prefix_ip_candidates(ip: Ipv4Addr) -> String {
@@ -354,11 +353,7 @@ impl RouterActor {
             .await
             .iter()
             .filter_map(|entry| {
-                if let Ok(entry) = entry {
-                    Some(entry)
-                } else {
-                    None
-                }
+                entry.as_ref().ok()
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -383,11 +378,7 @@ impl RouterActor {
             .await
             .iter()
             .filter_map(|entry| {
-                if let Ok(entry) = entry {
-                    Some(entry)
-                } else {
-                    None
-                }
+                entry.as_ref().ok()
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -425,12 +416,10 @@ impl RouterActor {
             .await;
         debug!("candidates for {ip}: {:?}", entries.iter().map(|e| e.as_ref().ok().map(|e| e.content_hash())).collect::<Vec<_>>());
         let mut candidates = Vec::new();
-        for entry_res in entries.into_iter() {
-            if let Ok(entry) = entry_res {
-                if let Ok(b) = self.blobs.get_bytes(entry.content_hash()).await {
-                    if let Ok(candidate) = postcard::from_bytes::<IpCandidate>(&b) {
-                        candidates.push(candidate);
-                    }
+        for entry in entries.into_iter().flatten() {
+            if let Ok(b) = self.blobs.get_bytes(entry.content_hash()).await {
+                if let Ok(candidate) = postcard::from_bytes::<IpCandidate>(&b) {
+                    candidates.push(candidate);
                 }
             }
         }
