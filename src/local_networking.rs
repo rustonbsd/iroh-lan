@@ -5,7 +5,7 @@ use tracing::debug;
 use std::{fmt::Debug, net::Ipv4Addr};
 use tun_rs::{AsyncDevice, DeviceBuilder, Layer};
 
-use actor_helper::{act, Action, Actor, Handle};
+use actor_helper::{act, Action, Handle};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Ipv4Pkg(Vec<u8>);
@@ -120,7 +120,7 @@ impl TunActor {
                     action(self).await;
                 }
                 Ok(len) = self.dev.recv(&mut dev_buf) => {
-                    if let Ok(ip_pkg) = Ipv4Pkg::new(&dev_buf[..len].to_vec()) {
+                    if let Ok(ip_pkg) = Ipv4Pkg::new(&dev_buf[..len]) {
                         let ip_pkg = ip_pkg.to_ipv4_packet().expect("this should have been validated during 'Ipv4Pkg::new' creation");
                         if matches!(
                             ip_pkg.get_next_level_protocol(),
