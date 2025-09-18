@@ -1,6 +1,7 @@
 use anyhow::Result;
 use pnet_packet::{Packet, ip::IpNextHeaderProtocols, ipv4::Ipv4Packet};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 use std::{fmt::Debug, net::Ipv4Addr};
 use tun_rs::{AsyncDevice, DeviceBuilder, Layer};
 
@@ -119,7 +120,6 @@ impl TunActor {
                     action(self).await;
                 }
                 Ok(len) = self.dev.recv(&mut dev_buf) => {
-                    //println!("tun_recv-size: {}", len);
                     if let Ok(ip_pkg) = Ipv4Pkg::new(&dev_buf[..len].to_vec()) {
                         let ip_pkg = ip_pkg.to_ipv4_packet().expect("this should have been validated during 'Ipv4Pkg::new' creation");
                         if matches!(
@@ -129,21 +129,22 @@ impl TunActor {
                             // if packet is ment for local ip: write
                             // if ment for ip of remote node: vpn -> write
 
+                            debug!(
+                                "{} {} {}",
+                                ip_pkg.get_next_level_protocol(),
+                                ip_pkg.get_source(),
+                                ip_pkg.get_destination(),
+                            );
+
                             if ip_pkg.get_destination() == self.ip {
-                                //println!("injected in local tun");
+                                debug!("injected in local tun");
                                 let _ = self.dev.send(ip_pkg.packet()).await;
                             } else {
-                                let _ = self.to_remote_writer.send(ip_pkg.into());
+                                let _res = self.to_remote_writer.send(ip_pkg.into());
 
-                               //println!("forwarding_to_remote_writer {}", res.is_ok());
+                               debug!("forwarding_to_remote_writer {}", _res.is_ok());
                             }
 
-                            /*println!(
-                                "{} {} {}",
-                                ip_pkt.get_next_level_protocol(),
-                                ip_pkt.get_source(),
-                                ip_pkt.get_destination(),
-                            );*/
                         }
                     }
                 }
@@ -159,7 +160,7 @@ impl TunActor {
     pub async fn write_to_tun(&self, pkg: Ipv4Pkg) -> Result<()> {
         let data = pkg.to_ipv4_packet()?.packet().to_vec();
         let _l = self.dev.send(&data).await?;
-        //println!("tun_send-size: {} {}", data.len(), _l);
+        debug!("tun_send-size: {} {}", data.len(), _l);
         Ok(())
     }
 

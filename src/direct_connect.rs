@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, info};
 use std::collections::{HashMap, hash_map::Entry};
 use actor_helper::{act, Action, Handle};
 use iroh::{NodeId, endpoint::Connection, protocol::ProtocolHandler};
@@ -87,7 +87,7 @@ impl DirectActor {
     }
 
     async fn handle_connection(&mut self, conn: iroh::endpoint::Connection) -> Result<()> {
-        println!("New direct connection from {:?}", conn.remote_node_id()?);
+        info!("New direct connection from {:?}", conn.remote_node_id()?);
         let remote_node_id = conn.remote_node_id()?;
 
         match self.peers.entry(remote_node_id) {

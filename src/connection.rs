@@ -195,7 +195,6 @@ impl Actor for ConnActor {
                 }, if self.state != ConnState::Closed && self.recv_stream.is_some() => {
                     if let Ok(frame_size) = stream_recv {
                         let _res = self.remote_read_next(frame_size).await;
-                        //println!("self.recv_stream.read_u32_le(): {}", _res.is_ok())
                     }
                 }
                 _ = self.sender_notify.notified(), if self.conn.is_some() && self.state == ConnState::Open => {
@@ -206,7 +205,6 @@ impl Actor for ConnActor {
                             break;
                         }
                     }
-                    //println!("self.remote_write_next().await: {}", _res.is_ok());
                 }
                 _ = self.receiver_notify.notified(), if self.conn.is_some() && self.state != ConnState::Closed => {
                     while let Some(msg) = self.receiver_queue.pop_back() {
@@ -374,7 +372,6 @@ impl ConnActor {
 
             let start = SystemTime::now();
             recv_stream.read_exact(&mut buf).await?;
-            //println!("elapsed timer {}", tokio::time::Instant::now().elapsed().as_millis() - timer);
 
             if let Ok(pkg) = postcard::from_bytes(&buf) {
                 match pkg {
