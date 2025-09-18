@@ -193,11 +193,9 @@ impl Actor for ConnActor {
                     }
                 }
                 stream_recv = async {
-                    let recv = self.recv_stream.as_mut().expect("recv_stream present");
+                    let recv = self.recv_stream.as_mut().expect("checked in if via self.recv_stream.is_some()");
                     recv.read_u32_le().await
                 }, if self.state != ConnState::Closed && self.recv_stream.is_some() => {
-
-                    println!("4 {:?}", self.state);
                     if let Ok(frame_size) = stream_recv {
                         let _res = self.remote_read_next(frame_size).await;
                     }
