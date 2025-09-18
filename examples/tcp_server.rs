@@ -2,7 +2,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let listener = tokio::net::TcpListener::bind("172.22.0.10:8000").await?;
+    let listener = tokio::net::TcpListener::bind("172.22.0.5:8000").await?;
     while let Ok((mut stream, addr)) = listener.accept().await {
         println!("Accepted connection from {}", addr);
         tokio::spawn(async move {
