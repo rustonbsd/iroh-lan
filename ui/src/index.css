@@ -118,3 +118,20 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Gray -> green slow pulse for active step dots */
+@keyframes dotPulseGreen {
+  0%, 100% {
+    background-color: color-mix(in oklab, var(--muted-foreground) 60%, transparent);
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--muted-foreground) 25%, transparent);
+  }
+  50% {
+    background-color: oklch(0.705 0.169 151.8); /* emerald-ish */
+    box-shadow: 0 0 0 6px oklch(0.705 0.169 151.8 / 0.15);
+  }
+}
+
+.dot-pulse-green {
+  background-color: color-mix(in oklab, var(--muted-foreground) 60%, transparent);
+  animation: dotPulseGreen 1.6s ease-in-out infinite;
+}
