@@ -289,6 +289,12 @@ fn query(q: impl Into<String>) -> impl Into<Query> {
         .build()
 }
 
+fn query_prefix(q: impl Into<String>) -> impl Into<Query> {
+    QueryBuilder::<SingleLatestPerKeyQuery>::default()
+        .key_prefix(q.into())
+        .build()
+}
+
 fn key_ip_assigned(ip: Ipv4Addr) -> String {
     format!("/assigned/ip/{}", ip)
 }
@@ -306,14 +312,14 @@ fn key_ip_candidate_prefix() -> String {
 }
 
 fn key_prefix_ip_candidates(ip: Ipv4Addr) -> String {
-    format!("/candidates/ip/{ip}")
+    format!("/candidates/ip/{ip}/")
 }
 
 impl RouterActor {
     async fn read_all_ip_assignments(&mut self) -> Result<Vec<IpAssignment>> {
         let entries = self
             .doc
-            .get_many(query(key_ip_assigned_prefix()))
+            .get_many(query_prefix(key_ip_assigned_prefix()))
             .await?
             .collect::<Vec<_>>()
             .await
@@ -342,7 +348,7 @@ impl RouterActor {
     async fn read_all_ip_candidates(&mut self) -> Result<Vec<IpCandidate>> {
         let entries = self
             .doc
-            .get_many(query(key_ip_candidate_prefix()))
+            .get_many(query_prefix(key_ip_candidate_prefix()))
             .await?
             .collect::<Vec<_>>()
             .await
@@ -384,11 +390,11 @@ impl RouterActor {
     async fn read_ip_candidates(&mut self, ip: Ipv4Addr) -> Result<Vec<IpCandidate>> {
         let entries = self
             .doc
-            .get_many(query(key_prefix_ip_candidates(ip)))
+            .get_many(query_prefix(key_prefix_ip_candidates(ip)))
             .await?
             .collect::<Vec<_>>()
             .await;
-
+        warn!("candidates for {ip}: {:?}", entries.iter().map(|e| e.as_ref().ok().map(|e| e.content_hash())).collect::<Vec<_>>());
         let mut candidates = Vec::new();
         for entry_res in entries.into_iter() {
             if let Ok(entry) = entry_res {
@@ -490,10 +496,12 @@ impl RouterActor {
         match self.my_ip.clone() {
             RouterIp::NoIp => {
                 let next_ip = self.get_next_ip().await?;
+                warn!("about to write ip candidate for {next_ip}");
                 self.my_ip = RouterIp::AquiringIp(
                     self.write_ip_candidate(next_ip, self.node_id).await?,
                     tokio::time::Instant::now(),
                 );
+                warn!("wrote ip candidate for {next_ip}");
                 Ok(false)
             }
             RouterIp::AquiringIp(ip_candidate, start_time) => {
