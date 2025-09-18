@@ -1,3 +1,4 @@
+use core::sync;
 use std::{net::Ipv4Addr, time::Duration};
 
 use distributed_topic_tracker::{
@@ -243,14 +244,15 @@ impl Router {
     }
 
     pub async fn get_peers(&self) -> Result<Vec<(NodeId, Option<Ipv4Addr>)>> {
-        self.api.call(act_ok!(actor => async move {
+        self.api.call(act!(actor => async move {
             let mut peers = vec![];
-            for pub_key in actor.gossip_receiver.neighbors().await.iter() {
-                let node_id = pub_key.clone();
+            let sync_peers = actor.doc.get_sync_peers().await?;
+            for pub_key in sync_peers.iter() {
+                let node_id = iroh::PublicKey::from_bytes(&pub_key.clone().as_slice()[0])?.into();
                 let ip = actor.get_ip_from_node_id(node_id).await.ok();
                 peers.push((node_id, ip));
             }
-            peers
+            Ok(peers)
         })).await
     }
 }
