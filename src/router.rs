@@ -18,7 +18,7 @@ use iroh::{Endpoint, SecretKey};
 use iroh_gossip::net::Gossip;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use actor_helper::{
     act, act_ok, Action, Actor, Handle
@@ -134,7 +134,7 @@ impl Builder {
             .map(|pub_key| NodeAddr::new(pub_key.clone()))
             .collect::<Vec<_>>();
 
-        warn!("[Doc peers]: {:?}", doc_peers);
+        debug!("[Doc peers]: {:?}", doc_peers);
 
         let author_id = docs.author_create().await?;
         let doc = docs
@@ -394,7 +394,7 @@ impl RouterActor {
             .await?
             .collect::<Vec<_>>()
             .await;
-        warn!("candidates for {ip}: {:?}", entries.iter().map(|e| e.as_ref().ok().map(|e| e.content_hash())).collect::<Vec<_>>());
+        debug!("candidates for {ip}: {:?}", entries.iter().map(|e| e.as_ref().ok().map(|e| e.content_hash())).collect::<Vec<_>>());
         let mut candidates = Vec::new();
         for entry_res in entries.into_iter() {
             if let Ok(entry) = entry_res {
@@ -496,12 +496,11 @@ impl RouterActor {
         match self.my_ip.clone() {
             RouterIp::NoIp => {
                 let next_ip = self.get_next_ip().await?;
-                warn!("about to write ip candidate for {next_ip}");
+                
                 self.my_ip = RouterIp::AquiringIp(
                     self.write_ip_candidate(next_ip, self.node_id).await?,
                     tokio::time::Instant::now(),
                 );
-                warn!("wrote ip candidate for {next_ip}");
                 Ok(false)
             }
             RouterIp::AquiringIp(ip_candidate, start_time) => {
