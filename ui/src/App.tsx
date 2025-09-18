@@ -41,7 +41,7 @@ export default function App() {
     if (!networkName) return;
     setLoading(true);
     setConnectingMessages([]);
-    pushMessage(`Starting network '${networkName}'`);
+    pushMessage("Looking for at least one peer to connect to…");
     // Enter Connecting view immediately because create_network can take a while
     setView(ViewState.Connecting);
     try {
@@ -51,6 +51,7 @@ export default function App() {
     } catch (e: any) {
       toast.error(String(e));
       setLoading(false);
+      setView(ViewState.Lobby);
     }
   };
 
@@ -86,7 +87,7 @@ export default function App() {
         if (state.peers !== lastPeers) {
           lastPeers = state.peers;
           if (state.peers === 0) {
-            pushMessage("Looking for peers…");
+            pushMessage("Looking for at least one peer to connect to…");
           } else {
             pushMessage(`Found ${state.peers} peer${state.peers === 1 ? "" : "s"}`);
           }
@@ -125,12 +126,12 @@ export default function App() {
 
   return (
     <div className="dark min-h-screen w-full bg-background text-foreground antialiased">
-      <Toaster position="top-right" richColors />
+      <Toaster position="top-left" richColors />
       <div className="mx-auto w-full max-w-4xl p-6 flex flex-col gap-8">
         <header className="flex items-center justify-between">
           <div className="flex flex-col">
             <h1 className="font-semibold tracking-tight text-xl">iroh-lan</h1>
-            <span className="text-xs text-muted-foreground">Ephemeral overlay network</span>
+            <span className="text-xs text-muted-foreground">have a lan party with iroh</span>
           </div>
           {view === ViewState.Network && myInfo && (
             <div className="flex items-center gap-4">
@@ -193,18 +194,23 @@ export default function App() {
               </CardHeader>
               <CardContent className="space-y-4 pt-2">
                 <div className="flex flex-col gap-2 text-xs font-mono">
-                  {connectingMessages.map((m) => (
-                    <div key={m} className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-muted-foreground/40" />
-                      <span>{m}</span>
-                    </div>
-                  ))}
+                  {connectingMessages.map((m, idx) => {
+                    const isActive = idx === connectingMessages.length - 1;
+                    return (
+                      <div key={m} className="flex items-center gap-2">
+                        <span
+                          className={cn(
+                            "w-2 h-2 rounded-full",
+                            isActive ? "dot-pulse-green" : "bg-muted-foreground/40"
+                          )}
+                        />
+                        <span>{m}</span>
+                      </div>
+                    );
+                  })}
                   {connectingMessages.length === 0 && <span className="opacity-60">Starting…</span>}
                 </div>
               </CardContent>
-              <CardFooter className="justify-end">
-                <Button variant="outline" size="sm" onClick={close} disabled={loading}>Cancel</Button>
-              </CardFooter>
             </Card>
           </div>
         )}
