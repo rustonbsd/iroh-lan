@@ -1,4 +1,3 @@
-use iroh::SecretKey;
 use iroh_lan::network::Network;
 use tokio::time::sleep;
 
@@ -14,7 +13,6 @@ async fn main() -> anyhow::Result<()> {
         .with_thread_ids(true)
         .init();
 
-    let secret = SecretKey::generate(&mut rand::thread_rng());
     let network = Network::new("test1", "<password>").await?;
 
     tokio::spawn(async move {
