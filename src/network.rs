@@ -131,9 +131,20 @@ impl Network {
             .await
     }
 
+    pub async fn get_direct_handle(&self) -> Result<Direct> {
+        self.api
+            .call(act_ok!(actor => async move { actor.direct.clone() }))
+            .await
+    }
+
     pub async fn close(&self) -> Result<()> {
         warn!("Closing network TODO!");
-        Ok(())
+
+        self.api.call(act_ok!(actor => async move {
+            let _ = actor._router.shutdown().await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            //actor._endpoint.close().await;
+        })).await
     }
 }
 

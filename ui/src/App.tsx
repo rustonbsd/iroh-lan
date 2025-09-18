@@ -12,7 +12,7 @@ import { Toaster } from "./components/ui/sonner";
 import { toast } from "sonner";
 import { cn } from "./lib/utils";
 
-type PeerStatus = "Active" | "Pending" | "Disconnected" | string;
+type PeerStatus = "Active" | "Idle" | "Pending" | "Disconnected" | string;
 type PeerInfo = { node_id: string; ip: string; status: PeerStatus };
 type MyInfo = { node_id: string; ip?: string | null };
 

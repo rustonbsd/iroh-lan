@@ -8,7 +8,7 @@ use tokio::{
 async fn main() -> anyhow::Result<()> {
     // bind local addr 172.22.0.3:0 and connect to remote
     let local: std::net::SocketAddr = "172.22.0.4:0".parse()?;
-    let remote: std::net::SocketAddr = "172.22.0.5:8000".parse()?;
+    let remote: std::net::SocketAddr = "172.22.0.3:8000".parse()?;
     let socket = tokio::net::TcpSocket::new_v4()?;
     socket.bind(local)?;
     let mut tcp_stream = socket.connect(remote).await?;

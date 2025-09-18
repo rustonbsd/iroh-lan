@@ -19,6 +19,7 @@ static NETWORK: Lazy<Mutex<Option<Network>>> = Lazy::new(|| {
 #[derive(Debug, Serialize)]
 pub enum Status {
     Active,
+    Idle,
     Pending,
     Disconnected,
 }
@@ -136,23 +137,30 @@ async fn my_info() -> Result<MyInfo, String> {
 async fn list_peers() -> Result<Vec<PeerInfo>, String> {
     let guard = NETWORK.lock().await;
     if let Some(network) = guard.as_ref() {
-        let mut peers = network.get_peers().await.map_err(|e| e.to_string())?
-            .iter()
-            .map(|(node_id, ip)| {
-                PeerInfo {
-                    node_id: node_id.to_string(),
-                    ip: match ip {
-                        Some(ip) => ip.to_string(),
-                        None => "unknown".to_string(),
-                    },
-                    status: Status::Active, // placeholder;
-                }
-            })
-            .collect::<Vec<_>>();
+        let direct_handle = network.get_direct_handle().await.map_err(|e| e.to_string())?;
+        let peers = network.get_peers().await.map_err(|e| e.to_string())?;
+        let mut peer_infos = vec![];
+        for peer in peers {
+            let status = direct_handle.get_conn_state(peer.0).await.map_err(|e| e.to_string()).unwrap_or(iroh_lan::ConnState::Idle);
+            peer_infos.push(PeerInfo {
+                node_id: peer.0.to_string(),
+                ip: match peer.1 {
+                    Some(ip) => ip.to_string(),
+                    None => "unknown".to_string(),
+                },
+                status: match status {
+                    iroh_lan::ConnState::Connecting => Status::Disconnected,
+                    iroh_lan::ConnState::Idle => Status::Active,
+                    iroh_lan::ConnState::Open => Status::Active,
+                    iroh_lan::ConnState::Disconnected => Status::Disconnected,
+                    iroh_lan::ConnState::Closed => Status::Disconnected,
+                },
+            });
+        }
 
-        peers.sort_by_key(|p| p.ip.clone());
+        peer_infos.sort_by_key(|p| p.ip.clone());
 
-        Ok(peers)
+        Ok(peer_infos)
     } else {
         Err("not_connected".into())
     }
@@ -181,7 +189,7 @@ pub fn run() {
             connection_state,
             close,
             create_network,
-            
+
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
