@@ -19,7 +19,7 @@ use iroh::{Endpoint, SecretKey};
 use iroh_gossip::net::Gossip;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use actor_helper::{
     act, act_ok, Action, Actor, Handle
@@ -144,6 +144,14 @@ impl Builder {
                 nodes: doc_peers.clone(),
             })
             .await?;
+
+        while let Ok(status) = doc.status().await {
+            warn!("Doc sync status: {:?}", status);
+            if status.sync {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
 
         let (api, rx) = Handle::<crate::router::RouterActor>::channel(1024 * 16);
         tokio::spawn(async move {
