@@ -169,14 +169,6 @@ impl Actor for ConnActor {
                     let need_reconnect = self.send_stream.is_none()
                         || self.conn.as_ref().and_then(|c| c.close_reason()).is_some();
 
-                    if let Some(conn) = &mut self.conn {
-                        if conn.close_reason().is_none() {
-                            // connection is fine, reset reconnect count
-                            self.reconnect_count.store(0, std::sync::atomic::Ordering::SeqCst);
-                            continue;
-                        }
-                    }
-
                     if need_reconnect && self.last_reconnect.elapsed() > self.reconnect_backoff {
                         if self.reconnect_count.load(std::sync::atomic::Ordering::SeqCst) < MAX_RECONNECTS {
                             warn!("Send stream stopped");
@@ -209,7 +201,8 @@ impl Actor for ConnActor {
                 _ = self.sender_notify.notified(), if self.conn.is_some() && self.state == ConnState::Open => {
                     while self.sender_queue.len() > 0 {
                         if self.remote_write_next().await.is_err() {
-                            let _ = self.try_reconnect().await;
+                            warn!("Failed to write to remote, will attempt to reconnect");
+                            self.set_state(ConnState::Disconnected);
                             break;
                         }
                     }
@@ -218,8 +211,8 @@ impl Actor for ConnActor {
                 _ = self.receiver_notify.notified(), if self.conn.is_some() && self.state != ConnState::Closed => {
                     while let Some(msg) = self.receiver_queue.pop_back() {
                         if self.external_sender.send(msg.clone()).is_err() {
-                            //println!("self.external_sender.send() CLOSED");
-                            println!("external sender closed");
+                            warn!("No active receivers for incoming messages");
+                            self.set_state(ConnState::Disconnected);
                             break;
                         }
                     }
@@ -322,6 +315,8 @@ impl ConnActor {
         if self.state == ConnState::Closed {
             return Err(anyhow::anyhow!("actor closed for good"));
         }
+
+        // still hangs then bursts
 
         self.state = ConnState::Connecting;
         self.reconnect_backoff *= 3;
