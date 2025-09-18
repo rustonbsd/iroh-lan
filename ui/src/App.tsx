@@ -18,41 +18,38 @@ type MyInfo = { node_id: string; ip?: string | null };
 
 enum ViewState {
   Lobby = "lobby",
+  Connecting = "connecting",
   Network = "network",
 }
 
+type ConnectionState = { peers: number; ip: string | null; raw_ip_state: string };
+
 export default function App() {
   const [view, setView] = useState<ViewState>(ViewState.Lobby);
-  const [mode, setMode] = useState<"create" | "join">("create");
   const [networkName, setNetworkName] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [myInfo, setMyInfo] = useState<MyInfo | null>(null);
   const [peers, setPeers] = useState<PeerInfo[]>([]);
   const [peerRefreshTick, setPeerRefreshTick] = useState(0);
+  const [connectingMessages, setConnectingMessages] = useState<string[]>([]);
+  const pushMessage = useCallback((m: string) => {
+    setConnectingMessages((prev) => (prev.includes(m) ? prev : [...prev, m]));
+  }, []);
 
   const connect = async () => {
     if (!networkName) return;
     setLoading(true);
+    setConnectingMessages([]);
+    pushMessage(`Starting network '${networkName}'`);
+    // Enter Connecting view immediately because create_network can take a while
+    setView(ViewState.Connecting);
     try {
-      const cmd = mode === "create" ? "create_network" : "join_network";
-      const res: MyInfo = await invoke(cmd, { name: networkName, password });
+      const res: MyInfo = await invoke("create_network", { name: networkName, password });
       setMyInfo(res);
-      setView(ViewState.Network);
-      toast.success(`${mode === "create" ? "Created" : "Joined"} network`);
-      // After join, poll a few times for IP allocation if missing
-      if (!res.ip) {
-        for (let i = 0; i < 10; i++) {
-          await new Promise((r) => setTimeout(r, 1000));
-            try {
-              const info: MyInfo = await invoke("my_info");
-              if (info.ip) { setMyInfo(info); break; }
-            } catch {}
-        }
-      }
+      toast.success("Network started (establishing IP)");
     } catch (e: any) {
       toast.error(String(e));
-    } finally {
       setLoading(false);
     }
   };
@@ -75,6 +72,46 @@ export default function App() {
   }, [view, fetchPeers]);
 
   useEffect(() => { if (view === ViewState.Network) fetchPeers(); }, [peerRefreshTick, view, fetchPeers]);
+
+  // Poll connection_state while in Connecting
+  useEffect(() => {
+    if (view !== ViewState.Connecting) return;
+    let cancelled = false;
+    let lastPeers = -1;
+    let lastRawState = "";
+    const interval = setInterval(async () => {
+      try {
+        const state: ConnectionState = await invoke("connection_state");
+        if (cancelled) return;
+        if (state.peers !== lastPeers) {
+          lastPeers = state.peers;
+          if (state.peers === 0) {
+            pushMessage("Looking for peers…");
+          } else {
+            pushMessage(`Found ${state.peers} peer${state.peers === 1 ? "" : "s"}`);
+          }
+        }
+        if (state.raw_ip_state !== lastRawState) {
+          lastRawState = state.raw_ip_state;
+          if (state.raw_ip_state === "NoIp") pushMessage("No IP yet");
+          if (state.raw_ip_state === "AquiringIp") pushMessage("Acquiring IP…");
+          if (state.raw_ip_state === "AssignedIp") pushMessage("Acquired IP");
+        }
+        if (state.ip && state.raw_ip_state === "AssignedIp") {
+          // fetch full info and transition
+            try {
+              const info: MyInfo = await invoke("my_info");
+              setMyInfo(info);
+            } catch {}
+          setView(ViewState.Network);
+          setLoading(false);
+        }
+      } catch (e) {
+        // swallow errors while connecting
+      }
+    }, 1000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [view, pushMessage]);
 
   const close = async () => {
     await invoke("close");
@@ -125,14 +162,10 @@ export default function App() {
           <div className="grid gap-8">
             <Card>
               <CardHeader className="pb-2">
-                <CardTitle className="text-lg">{mode === "create" ? "Create Network" : "Join Network"}</CardTitle>
-                <CardDescription>{mode === "create" ? "Start a new overlay network." : "Join an existing overlay by name."}</CardDescription>
+                <CardTitle className="text-lg">Join Network</CardTitle>
+                <CardDescription>Participate or create an overlay network.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4 pt-2">
-                <div className="flex gap-2">
-                  <Button variant={mode === "create" ? "default" : "outline"} size="sm" onClick={() => setMode("create")}>Create</Button>
-                  <Button variant={mode === "join" ? "default" : "outline"} size="sm" onClick={() => setMode("join")}>Join</Button>
-                </div>
                 <div className="grid gap-2">
                   <Label htmlFor="networkName">Network Name</Label>
                   <Input id="networkName" placeholder="lan-party" value={networkName} onChange={(e) => setNetworkName(e.target.value)} autoFocus />
@@ -145,8 +178,32 @@ export default function App() {
               <CardFooter className="justify-between">
                 <p className="text-xs text-muted-foreground max-w-[60%] leading-relaxed">Node IDs rotate on restart. Share the network name (and password if set) with peers.</p>
                 <Button disabled={!networkName || loading} onClick={connect}>
-                  {loading ? (mode === "create" ? "Creating…" : "Joining…") : mode === "create" ? "Create" : "Join"}
+                  {loading ? "Joining…" : "Join"}
                 </Button>
+              </CardFooter>
+            </Card>
+          </div>
+        )}
+        {view === ViewState.Connecting && (
+          <div className="grid gap-8">
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg">Connecting…</CardTitle>
+                <CardDescription>Establishing overlay session</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4 pt-2">
+                <div className="flex flex-col gap-2 text-xs font-mono">
+                  {connectingMessages.map((m) => (
+                    <div key={m} className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-muted-foreground/40" />
+                      <span>{m}</span>
+                    </div>
+                  ))}
+                  {connectingMessages.length === 0 && <span className="opacity-60">Starting…</span>}
+                </div>
+              </CardContent>
+              <CardFooter className="justify-end">
+                <Button variant="outline" size="sm" onClick={close} disabled={loading}>Cancel</Button>
               </CardFooter>
             </Card>
           </div>

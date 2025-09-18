@@ -65,7 +65,7 @@ async fn create_network(name: String, password: String) -> Result<MyInfo, String
         .await
         .map_err(|e| e.to_string())?;
     info!(
-        "Created network with node ID {}",
+        "Joined network with node ID {}",
         network
             .get_router_handle()
             .await
@@ -82,9 +82,42 @@ async fn create_network(name: String, password: String) -> Result<MyInfo, String
         .map_err(|e| e.to_string())?)
 }
 
+#[derive(Debug, Serialize)]
+pub struct ConnectionState {
+    pub peers: usize,
+    pub ip: Option<String>,
+    pub raw_ip_state: String,
+}
+
 #[tauri::command]
-async fn join_network(name: String, password: String) -> Result<MyInfo, String> {
-    create_network(name, password).await
+async fn connection_state() -> Result<ConnectionState, String> {
+    let guard = NETWORK.lock().await;
+    if let Some(network) = guard.as_ref() {
+        // peer count
+        let peers = network
+            .get_peers()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let router = network.get_router_handle().await.map_err(|e| e.to_string())?;
+        let ip_state = router.get_ip_state().await.map_err(|e| e.to_string())?;
+        let (ip, raw_ip_state) = match ip_state {
+            iroh_lan::RouterIp::NoIp => (None, "NoIp".to_string()),
+            iroh_lan::RouterIp::AquiringIp(candidate, _) => (
+                Some(format!("acquiring {}...", candidate.ip)),
+                "AquiringIp".to_string(),
+            ),
+            iroh_lan::RouterIp::AssignedIp(addr) => (Some(addr.to_string()), "AssignedIp".to_string()),
+        };
+
+        Ok(ConnectionState {
+            peers: peers.len(),
+            ip,
+            raw_ip_state,
+        })
+    } else {
+        Err("not_connected".into())
+    }
 }
 
 #[tauri::command]
@@ -143,11 +176,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            create_network,
-            join_network,
             my_info,
             list_peers,
-            close
+            connection_state,
+            close,
+            create_network,
+            
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
