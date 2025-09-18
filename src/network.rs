@@ -1,11 +1,12 @@
 use std::time::Duration;
 
-use actor_helper::{act, Action, Actor, Handle};
+use actor_helper::{act, act_ok, Action, Actor, Handle};
 use anyhow::Result;
 use iroh::{Endpoint, SecretKey};
 use iroh_blobs::store::mem::MemStore;
 use iroh_docs::protocol::Docs;
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
+use tracing::warn;
 
 use crate::{ 
     local_networking::Ipv4Pkg, router::RouterIp, Direct, DirectMessage, Router, Tun
@@ -111,6 +112,29 @@ impl Network {
             .call(act!(actor => actor.router.get_ip_state()))
             .await
     }
+
+    pub async fn get_router_handle(&self) -> Result<Router> {
+        self.api
+            .call(act_ok!(actor => async move { actor.router.clone() }))
+            .await
+    }
+
+    pub async fn get_node_id(&self) -> Result<iroh::NodeId> {
+        self.api
+            .call(act!(actor => actor.router.get_node_id()))
+            .await
+    }
+
+    pub async fn get_peers(&self) -> Result<Vec<(iroh::NodeId,Option<std::net::Ipv4Addr>)>> {
+        self.api
+            .call(act!(actor => actor.router.get_peers()))
+            .await
+    }
+
+    pub async fn close(&self) -> Result<()> {
+        warn!("Closing network TODO!");
+        Ok(())
+    }
 }
 
 impl Actor for NetworkActor {
@@ -160,66 +184,3 @@ impl Actor for NetworkActor {
         Ok(())
     }
 }
-
-/*
-pub async fn run(
-    name: &str,
-    password: &str,
-    creator_mode: bool,
-) -> anyhow::Result<(crate::Router, JoinHandle<()>)> {
-    let secret = SecretKey::generate(&mut rand::thread_rng());
-    let router = if creator_mode {
-        crate::Router::builder()
-            .entry_name(name)
-            .password(password)
-            .creator_mode()
-            .secret_key(secret.clone())
-            .build()
-            .await?
-    } else {
-        crate::Router::builder()
-            .entry_name(name)
-            .password(password)
-            .secret_key(secret.clone())
-            .build()
-            .await?
-    };
-
-    Ok((
-        router.clone(),
-        tokio::spawn(async move {
-            let mut direct_rx = router.subscribe_direct_connect();
-            let tun = router.tun.clone().expect("tun device not set").clone();
-            let mut remote_reader = tun.subscribe().await.expect("subscribe to work");
-            println!("Started standalone router event loop");
-            loop {
-                tokio::select! {
-                    Ok(tun_recv) = remote_reader.recv() => {
-                        if let Ok(remote_node_id)  = router.ip_to_node_id(tun_recv.clone()).await {
-                            if let Err(err) = router.direct.route_packet(remote_node_id, DirectMessage::IpPacket(tun_recv)).await {
-                                tokio::spawn({
-                                    let router = router.clone();
-                                    async move {
-                                        println!("Creating new connection to peer {}", remote_node_id);
-                                        if let Ok(quic_conn) = router.direct.get_endpoint().await.connect(remote_node_id, crate::Direct::ALPN).await {
-                                            let _ = router.direct.handle_connection(quic_conn).await;
-                                        }
-                                }});
-                                println!("[ERROR] failed to route packet to {:?}", remote_node_id);
-                                println!("Reason: {:?}", err);
-                            }
-                        }
-                    }
-                    Ok(direct_msg) = direct_rx.recv() => {
-                        match direct_msg {
-                            DirectMessage::IpPacket(ip_pkg) => {
-                                let _ = tun.write(ip_pkg).await;
-                            }
-                        }
-                    }
-                }
-            }
-        }),
-    ))
-}
- */

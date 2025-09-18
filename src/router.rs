@@ -18,7 +18,7 @@ use iroh::{Endpoint, SecretKey};
 use iroh_gossip::net::Gossip;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use actor_helper::{
     act, act_ok, Action, Actor, Handle
@@ -223,6 +223,13 @@ impl Router {
             .await
     }
 
+    pub async fn get_node_id(&self) -> Result<NodeId> {
+        self.api.call(act_ok!(actor => async move {
+                actor.node_id
+        })).await
+    }
+
+
     pub async fn get_ip_from_node_id(&self, node_id: NodeId) -> Result<Ipv4Addr> {
         self.api
             .call(act!(actor => actor.get_ip_from_node_id(node_id)))
@@ -233,6 +240,18 @@ impl Router {
         self.api
             .call(act!(actor => actor.get_node_id_from_ip(ip)))
             .await
+    }
+
+    pub async fn get_peers(&self) -> Result<Vec<(NodeId, Option<Ipv4Addr>)>> {
+        self.api.call(act_ok!(actor => async move {
+            let mut peers = vec![];
+            for pub_key in actor.gossip_receiver.neighbors().await.iter() {
+                let node_id = pub_key.clone();
+                let ip = actor.get_ip_from_node_id(node_id).await.ok();
+                peers.push((node_id, ip));
+            }
+            peers
+        })).await
     }
 }
 
@@ -264,15 +283,15 @@ impl Actor for RouterActor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct IpAssignment {
-    ip: Ipv4Addr,
-    node_id: NodeId,
+pub struct IpAssignment {
+    pub ip: Ipv4Addr,
+    pub node_id: NodeId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct IpCandidate {
-    ip: Ipv4Addr,
-    node_id: NodeId,
+pub struct IpCandidate {
+    pub ip: Ipv4Addr,
+    pub node_id: NodeId,
 }
 
 async fn entry_to_value<S: for<'a> Deserialize<'a>>(

@@ -14,7 +14,7 @@ import { cn } from "./lib/utils";
 
 type PeerStatus = "Active" | "Pending" | "Disconnected" | string;
 type PeerInfo = { node_id: string; ip: string; status: PeerStatus };
-type MyInfo = { node_id: string; ip?: string | null; leader: boolean };
+type MyInfo = { node_id: string; ip?: string | null };
 
 enum ViewState {
   Lobby = "lobby",
@@ -114,7 +114,7 @@ export default function App() {
                     </Button>
                   )}
                 </div>
-                <span className="opacity-50">ID {myInfo.node_id.slice(0, 18)}… {myInfo.leader && <span className="text-primary">(leader)</span>}</span>
+                <span className="opacity-50">ID {myInfo.node_id.slice(0, 18)}</span>
               </div>
               <Button variant="outline" size="sm" onClick={close}>Close</Button>
             </div>
@@ -126,7 +126,7 @@ export default function App() {
             <Card>
               <CardHeader className="pb-2">
                 <CardTitle className="text-lg">{mode === "create" ? "Create Network" : "Join Network"}</CardTitle>
-                <CardDescription>{mode === "create" ? "Start a new overlay and become leader." : "Join an existing overlay by name."}</CardDescription>
+                <CardDescription>{mode === "create" ? "Start a new overlay network." : "Join an existing overlay by name."}</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4 pt-2">
                 <div className="flex gap-2">
@@ -203,24 +203,6 @@ export default function App() {
                             >
                               {p.status}
                             </Badge>
-                            {myInfo && myInfo.leader && p.node_id !== myInfo.node_id && (
-                              <Button
-                                variant="destructive"
-                                size="sm"
-                                className="h-6 px-2 text-[10px]"
-                                onClick={async () => {
-                                  try {
-                                    await invoke("kick_peer", { nodeId: p.node_id });
-                                    toast.success("Kick signal sent");
-                                    fetchPeers();
-                                  } catch (e:any) {
-                                    toast.error(String(e));
-                                  }
-                                }}
-                              >
-                                kick
-                              </Button>
-                            )}
                           </TableCell>
                         </TableRow>
                       ))}

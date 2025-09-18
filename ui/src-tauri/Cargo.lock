@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "actor-helper"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "792712fc55d66f4aaf1797f507d450442115be9fca678a148e86207ea4e2302a"
+dependencies = [
+ "anyhow",
+ "futures",
+ "tokio",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3092,6 +3103,7 @@ dependencies = [
 name = "iroh-lan"
 version = "0.1.0"
 dependencies = [
+ "actor-helper",
  "anyhow",
  "distributed-topic-tracker",
  "futures",
@@ -3108,6 +3120,8 @@ dependencies = [
  "serde",
  "sha2",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "tun-rs",
  "z32",
 ]
@@ -3127,6 +3141,8 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -9,4 +9,4 @@ pub mod network;
 
 pub use local_networking::Tun;
 pub use direct_connect::{Direct, DirectMessage};
-pub use router::Router;
+pub use router::{Router, RouterIp, IpAssignment, IpCandidate};
