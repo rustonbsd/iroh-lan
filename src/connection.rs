@@ -1,12 +1,9 @@
 use std::{
-    collections::VecDeque,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    collections::VecDeque, sync::atomic::AtomicUsize, time::{Duration, SystemTime}
 };
 
-use actor_helper::{act, act_ok, Action, Actor, Handle};
-use crate::{
-    DirectMessage,
-};
+use crate::DirectMessage;
+use actor_helper::{Action, Actor, Handle, act, act_ok};
 use anyhow::Result;
 use iroh::{
     Endpoint,
@@ -17,10 +14,11 @@ use iroh::{
     endpoint::{Connection, VarInt},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::debug;
+use tracing::{debug, warn};
 
 const QUEUE_SIZE: usize = 1024 * 16;
-const MAX_RECONNECTS: u64 = 5;
+const MAX_RECONNECTS: usize = 5;
+const RECONNECT_BACKOFF_BASE: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub struct Conn {
@@ -38,7 +36,7 @@ pub enum ConnState {
 #[derive(Debug)]
 struct ConnActor {
     rx: tokio::sync::mpsc::Receiver<Action<ConnActor>>,
-
+    self_handle: Handle<ConnActor>,
     state: ConnState,
 
     // all of these need to be optionals so that we can create an empty
@@ -51,8 +49,9 @@ struct ConnActor {
     recv_stream: Option<RecvStream>,
     endpoint: Endpoint,
 
-    last_reconnect: u64,
-    reconnect_backoff: u64,
+    last_reconnect: tokio::time::Instant,
+    reconnect_backoff: Duration,
+    reconnect_count: AtomicUsize,
 
     external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
 
@@ -74,6 +73,7 @@ impl Conn {
         let (api, rx) = Handle::<ConnActor>::channel(1024);
         let mut actor = ConnActor::new(
             rx,
+            api.clone(),
             external_sender,
             endpoint,
             conn.remote_node_id()?,
@@ -94,6 +94,7 @@ impl Conn {
         let (api, rx) = Handle::<ConnActor>::channel(1024);
         let mut actor = ConnActor::new(
             rx,
+            api.clone(),
             external_sender,
             endpoint.clone(),
             node_id,
@@ -152,32 +153,38 @@ impl Conn {
 
 impl Actor for ConnActor {
     async fn run(&mut self) -> Result<()> {
-        let mut reconnect_count = 0;
         let mut reconnect_ticker = tokio::time::interval(Duration::from_millis(500));
-        let mut notification_ticker = tokio::time::interval(Duration::from_secs(500));
+        let mut notification_ticker = tokio::time::interval(Duration::from_millis(500));
+
+        reconnect_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        notification_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
-            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             tokio::select! {
                 Some(action) = self.rx.recv() => {
                     action(self).await;
                 }
-                _ = reconnect_ticker.tick(), if self.state != ConnState::Closed
-                    && now > self.last_reconnect + self.reconnect_backoff
-                    && (
-                        self.send_stream.is_none() ||
-                        self.conn.as_ref().and_then(|c| c.close_reason()).is_some()
-                    ) => {
-                    if reconnect_count < MAX_RECONNECTS {
-                        if self.try_reconnect().await.is_err() {
-                            println!("Send stream stopped");
-                            reconnect_count += 1;
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                        } else {
-                            reconnect_count = 0;
+                _ = reconnect_ticker.tick(), if self.state != ConnState::Closed => {
+
+                    let need_reconnect = self.send_stream.is_none()
+                        || self.conn.as_ref().and_then(|c| c.close_reason()).is_some();
+
+                    if let Some(conn) = &mut self.conn {
+                        if conn.close_reason().is_none() {
+                            // connection is fine, reset reconnect count
+                            self.reconnect_count.store(0, std::sync::atomic::Ordering::SeqCst);
+                            continue;
                         }
-                    } else {
-                        println!("Max reconnects reached, closing connection to {}", self.conn_node_id);
-                        break;
+                    }
+
+                    if need_reconnect && self.last_reconnect.elapsed() > self.reconnect_backoff {
+                        if self.reconnect_count.load(std::sync::atomic::Ordering::SeqCst) < MAX_RECONNECTS {
+                            warn!("Send stream stopped");
+                            let _ = self.try_reconnect().await;
+                        } else {
+                            warn!("Max reconnects reached, closing connection to {}", self.conn_node_id);
+                            break;
+                        }
                     }
                 }
                 _ = notification_ticker.tick(), if self.state != ConnState::Closed
@@ -230,6 +237,7 @@ impl Actor for ConnActor {
 impl ConnActor {
     pub async fn new(
         rx: tokio::sync::mpsc::Receiver<Action<ConnActor>>,
+        self_handle: Handle<ConnActor>,
         external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
         endpoint: Endpoint,
         conn_node_id: NodeId,
@@ -253,9 +261,11 @@ impl ConnActor {
             endpoint,
             receiver_notify: tokio::sync::Notify::new(),
             sender_notify: tokio::sync::Notify::new(),
-            last_reconnect: 0,
-            reconnect_backoff: 1,
+            last_reconnect: tokio::time::Instant::now(),
+            reconnect_backoff: Duration::from_millis(100),
             conn_node_id,
+            self_handle,
+            reconnect_count: AtomicUsize::new(0),
         }
     }
 
@@ -300,7 +310,7 @@ impl ConnActor {
         self.state = ConnState::Open;
         self.sender_notify.notify_one();
         self.receiver_notify.notify_one();
-        self.reconnect_backoff = 1;
+        self.reconnect_backoff = RECONNECT_BACKOFF_BASE;
 
         // SHOULD NOT CHANGE but just for sanity
         //self.conn_node_id = self.conn.clone().expect("new_conn").remote_node_id()?;
@@ -312,39 +322,27 @@ impl ConnActor {
         if self.state == ConnState::Closed {
             return Err(anyhow::anyhow!("actor closed for good"));
         }
-        if let Some(conn) = &mut self.conn {
-            if conn.close_reason().is_none() {
-                println!("close reason ok state: {:?}", self.state);
-                return Ok(());
-            }
-        }
 
         self.state = ConnState::Connecting;
         self.reconnect_backoff *= 3;
-        self.last_reconnect = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        self.last_reconnect = tokio::time::Instant::now();
 
-        if let Ok(conn) = self
-            .endpoint
-            .connect(self.conn_node_id, crate::Direct::ALPN)
-            .await
-        {
-            if let Ok((send_stream, recv_stream)) = conn.open_bi().await {
-                self.send_stream = Some(send_stream);
-                self.recv_stream = Some(recv_stream);
-                self.conn = Some(conn);
-                self.reconnect_backoff = 1;
-                self.state = ConnState::Open;
-                self.sender_notify.notify_one();
-                self.receiver_notify.notify_one();
-                Ok(())
-            } else {
-                self.state = ConnState::Disconnected;
-                return Err(anyhow::anyhow!("failed to open streams"));
+        tokio::spawn({
+            let api = self.self_handle.clone();
+            let endpoint = self.endpoint.clone();
+            let conn_node_id = self.conn_node_id;
+            async move {
+                if let Ok(conn) = endpoint.connect(conn_node_id, crate::Direct::ALPN).await {
+                    let _ = api
+                        .call(act!(actor => actor.incoming_connection(conn, false)))
+                        .await;
+                    let _ = api.call(act_ok!(actor => async move { actor.reconnect_count.store(0, std::sync::atomic::Ordering::SeqCst) })).await;
+                } else {
+                    let _ = api.call(act_ok!(actor => async move { actor.reconnect_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) })).await;
+                }
             }
-        } else {
-            // Connecting state, will retry later
-            return Err(anyhow::anyhow!("failed to connect"));
-        }
+        });
+        Ok(())
     }
 
     async fn remote_write_next(&mut self) -> Result<()> {
