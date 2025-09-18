@@ -1,4 +1,4 @@
-use iroh_lan::network::Network;
+use iroh_lan::{RouterIp, network::Network};
 use tokio::time::sleep;
 
 #[tokio::main]
@@ -14,6 +14,15 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let network = Network::new("test1", "<password>").await?;
+
+    while matches!(
+        network.get_router_state().await?,
+        RouterIp::NoIp | RouterIp::AquiringIp(_, _)
+    ) {
+        sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    println!("my ip is {:?}", network.get_router_state().await?);
 
     tokio::spawn(async move {
         loop {
