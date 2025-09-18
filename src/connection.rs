@@ -1,5 +1,7 @@
 use std::{
-    collections::VecDeque, sync::atomic::AtomicUsize, time::{Duration, SystemTime}
+    collections::VecDeque,
+    sync::atomic::AtomicUsize,
+    time::{Duration, SystemTime},
 };
 
 use crate::DirectMessage;
@@ -182,6 +184,7 @@ impl Actor for ConnActor {
                 _ = notification_ticker.tick(), if self.state != ConnState::Closed
                         && (!self.sender_queue.is_empty()
                             || self.receiver_queue.is_empty()) => {
+
                     if !self.sender_queue.is_empty() {
                         self.sender_notify.notify_one();
                     }
@@ -193,6 +196,8 @@ impl Actor for ConnActor {
                     let recv = self.recv_stream.as_mut().expect("recv_stream present");
                     recv.read_u32_le().await
                 }, if self.state != ConnState::Closed && self.recv_stream.is_some() => {
+
+                    println!("4 {:?}", self.state);
                     if let Ok(frame_size) = stream_recv {
                         let _res = self.remote_read_next(frame_size).await;
                     }
@@ -207,6 +212,7 @@ impl Actor for ConnActor {
                     }
                 }
                 _ = self.receiver_notify.notified(), if self.conn.is_some() && self.state != ConnState::Closed => {
+
                     while let Some(msg) = self.receiver_queue.pop_back() {
                         if self.external_sender.send(msg.clone()).is_err() {
                             warn!("No active receivers for incoming messages");
@@ -315,11 +321,13 @@ impl ConnActor {
             return Err(anyhow::anyhow!("actor closed for good"));
         }
 
-        // still hangs then bursts
-
         self.state = ConnState::Connecting;
         self.reconnect_backoff *= 3;
         self.last_reconnect = tokio::time::Instant::now();
+
+        self.send_stream = None;
+        self.recv_stream = None;
+        self.conn = None;
 
         tokio::spawn({
             let api = self.self_handle.clone();
