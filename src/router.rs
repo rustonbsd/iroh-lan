@@ -264,6 +264,10 @@ impl Router {
             Ok(peers)
         })).await
     }
+
+    pub async fn close(&self) -> Result<()> {
+        self.api.call(act!(actor => actor.doc.close())).await
+    }
 }
 
 impl Actor for RouterActor {

@@ -1,15 +1,11 @@
+use actor_helper::{Action, Handle, act};
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
-use std::collections::{HashMap, hash_map::Entry};
-use actor_helper::{act, Action, Handle};
 use iroh::{NodeId, endpoint::Connection, protocol::ProtocolHandler};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, hash_map::Entry};
+use tracing::{debug, info};
 
-use crate::{
-    connection::Conn, local_networking::Ipv4Pkg
-};
-
-
+use crate::{connection::Conn, local_networking::Ipv4Pkg};
 
 #[derive(Debug, Clone)]
 pub struct Direct {
@@ -36,7 +32,7 @@ impl Direct {
         endpoint: iroh::endpoint::Endpoint,
         direct_connect_tx: tokio::sync::broadcast::Sender<DirectMessage>,
     ) -> Self {
-        let (api, rx) = Handle::<DirectActor>::channel(1024*16);
+        let (api, rx) = Handle::<DirectActor>::channel(1024 * 16);
         let mut actor = DirectActor {
             peers: HashMap::new(),
             endpoint,
@@ -49,22 +45,27 @@ impl Direct {
 
     pub async fn handle_connection(&self, conn: Connection) -> Result<()> {
         self.api
-            .call(move |actor| Box::pin(actor.handle_connection(conn)))
+            .call(act!(actor => actor.handle_connection(conn)))
             .await
     }
 
     pub async fn route_packet(&self, to: NodeId, pkg: DirectMessage) -> Result<()> {
-        self.api.call(move |actor| Box::pin(actor.route_packet(to, pkg))).await
-    }
-
-    pub async fn kick_peer(&self, node_id: NodeId) -> Result<()> {
         self.api
-            .call(act!(actor => actor.kick_peer(node_id)))
+            .call(act!(actor => actor.route_packet(to, pkg)))
             .await
     }
 
     pub async fn get_endpoint(&self) -> iroh::endpoint::Endpoint {
-        self.api.call(act!(actor => actor.get_endpoint())).await.unwrap()
+        self.api
+            .call(act!(actor => actor.get_endpoint()))
+            .await
+            .unwrap()
+    }
+
+    pub async fn get_conn_state(&self, node_id: NodeId) -> Result<crate::connection::ConnState> {
+        self.api
+            .call(act!(actor => actor.get_conn_state(node_id)))
+            .await
     }
 
     pub async fn close(&self) -> Result<()> {
@@ -92,30 +93,24 @@ impl DirectActor {
 
         match self.peers.entry(remote_node_id) {
             Entry::Occupied(mut entry) => {
-                entry.get_mut().incoming_connection(conn,true).await?;
+                entry.get_mut().incoming_connection(conn, true).await?;
             }
             Entry::Vacant(entry) => {
                 let (send_stream, recv_stream) = conn.accept_bi().await?;
                 entry.insert(
-                    Conn::new(self.endpoint.clone(), conn, send_stream, recv_stream, self.direct_connect_tx.clone()).await?,
+                    Conn::new(
+                        self.endpoint.clone(),
+                        conn,
+                        send_stream,
+                        recv_stream,
+                        self.direct_connect_tx.clone(),
+                    )
+                    .await?,
                 );
             }
         }
 
         Ok(())
-    }
-
-    async fn kick_peer(&mut self, node_id: NodeId) -> Result<()> {
-        match self.peers.entry(node_id) {
-            Entry::Occupied(entry) => {
-                let _ = entry.get().close().await.ok();
-                entry.remove();
-                Ok(())
-            }
-            Entry::Vacant(_) => {
-                Ok(())
-            }
-        }
     }
 
     async fn route_packet(&mut self, to: NodeId, pkg: DirectMessage) -> Result<()> {
@@ -130,11 +125,8 @@ impl DirectActor {
                 entry.get().write(pkg).await?;
             }
             Entry::Vacant(entry) => {
-                let conn = Conn::connect(
-                    self.endpoint.clone(),
-                    to,
-                    self.direct_connect_tx.clone(),
-                ).await;
+                let conn =
+                    Conn::connect(self.endpoint.clone(), to, self.direct_connect_tx.clone()).await;
 
                 conn.write(pkg).await?;
                 entry.insert(conn);
@@ -142,6 +134,16 @@ impl DirectActor {
         }
 
         Ok(())
+    }
+
+    pub async fn get_conn_state(&self, node_id: NodeId) -> Result<crate::connection::ConnState> {
+        Ok(self
+            .peers
+            .get(&node_id)
+            .cloned()
+            .ok_or(anyhow::anyhow!("no connection to peer"))?
+            .get_state()
+            .await)
     }
 
     pub async fn get_endpoint(&self) -> Result<iroh::endpoint::Endpoint> {

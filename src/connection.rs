@@ -30,6 +30,7 @@ pub struct Conn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnState {
     Connecting, // ConnActor::connect() called, waiting for connection to be established (in background)
+    Idle,       // no active connection, can be connected
     Open,       // open bi directional streams
     Closed,     // connection closed by user or error
     Disconnected, // connection closed by remote peer, can be recovered within 5 retries after Closed
