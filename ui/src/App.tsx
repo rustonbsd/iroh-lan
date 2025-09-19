@@ -126,12 +126,64 @@ export default function App() {
 
   return (
     <div className="dark min-h-screen w-full bg-background text-foreground antialiased">
-      <Toaster position="top-left" richColors />
+      <Toaster
+        position="bottom-right"
+        richColors
+        closeButton
+        offset={8}
+        gap={6}
+        toastOptions={{
+          duration: 1200,
+          classNames: {
+            toast: "px-2 py-1",
+            title: "text-xs",
+            description: "text-[11px]",
+          },
+        }}
+      />
       <div className="mx-auto w-full max-w-4xl p-6 flex flex-col gap-8">
         <header className="flex items-center justify-between">
           <div className="flex flex-col">
             <h1 className="font-semibold tracking-tight text-xl">iroh-lan</h1>
-            <span className="text-xs text-muted-foreground">have a lan party with iroh</span>
+            {view === ViewState.Network ? (
+              <div className="flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
+                <div className="flex items-center gap-1">
+                  <span>Network:</span>
+                  <span
+                    className="font-mono cursor-pointer hover:underline hover:text-foreground truncate max-w-[200px]"
+                    title={networkName}
+                    role="button"
+                    onClick={() => {
+                      if (!networkName) return;
+                      navigator.clipboard.writeText(networkName);
+                      toast.success("Copied network name");
+                    }}
+                  >
+                    {networkName || "unknown"}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <span>Password:</span>
+                  <span
+                    className={cn(
+                      "font-mono truncate max-w-[200px]",
+                      password && "cursor-pointer hover:underline hover:text-foreground"
+                    )}
+                    title={password ? "Click to copy password" : undefined}
+                    role={password ? "button" : undefined}
+                    onClick={() => {
+                      if (!password) return;
+                      navigator.clipboard.writeText(password);
+                      toast.success("Copied password");
+                    }}
+                  >
+                    {password ? "••••••" : "no password set"}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <span className="text-xs text-muted-foreground">have a lan party with iroh</span>
+            )}
           </div>
           {view === ViewState.Network && myInfo && (
             <div className="flex items-center gap-4">
@@ -152,7 +204,7 @@ export default function App() {
                     </Button>
                   )}
                 </div>
-                <span className="opacity-50">ID {myInfo.node_id.slice(0, 18)}</span>
+                <span className="opacity-50 max-w-[200px] truncate inline-block align-bottom" title={myInfo.node_id}>ID {myInfo.node_id}</span>
               </div>
               <Button variant="outline" size="sm" onClick={close}>Close</Button>
             </div>
@@ -225,11 +277,11 @@ export default function App() {
             <Card className="p-0">
               <CardContent className="p-0">
                 <ScrollArea className="max-h-[420px]">
-                  <Table>
+                  <Table className="table-fixed">
                     <TableHeader>
                       <TableRow>
                         <TableHead className="w-[180px]">IP</TableHead>
-                        <TableHead>Node ID</TableHead>
+                        <TableHead className="w-[calc(100%-360px)]">Node ID</TableHead>
                         <TableHead className="w-[180px] text-right">Actions / Status</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -255,7 +307,7 @@ export default function App() {
                               copy
                             </Button>
                           </TableCell>
-                          <TableCell className="font-mono text-[10px] opacity-70">{p.node_id}</TableCell>
+                          <TableCell className="font-mono text-[10px] opacity-70 truncate max-w-[1px]" title={p.node_id}>{p.node_id}</TableCell>
                           <TableCell className="text-right flex items-center justify-end gap-2">
                             <Badge
                               variant="outline"
