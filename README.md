@@ -2,14 +2,11 @@
 
 Have a lan party with iroh + tun cross platform
 
-Very work in progress!
+Working work in progress!
 
 Status
 - Transport: overhauled and fully working
-- Tauri UI: early work-in-progress, coming soon
-
-This PR merges the refactored transport code so it can be used from main even though the UI is not yet complete.
-
+- Tauri UI: working, no pre-builds yet (node and pnpm required)
 
 # UI
 
@@ -102,6 +99,12 @@ async fn main() -> anyhow::Result<()> {
     // as long as the network handle is kept alive you have a fully functioning L3 virtual lan proxy like hamachi
 }
 ```
+
+## Run UI
+
+Create a lan party:
+
+    cargo tauri dev
 
 ## TODOs
 
