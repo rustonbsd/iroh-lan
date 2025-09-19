@@ -102,6 +102,11 @@ async fn main() -> anyhow::Result<()> {
 
 ## Run UI
 
+Some notes:
+- nodejs with pnpm is used
+- tauri v2
+- on windows you need to add the [wintun.dll](https://www.wintun.net/), a standalone windows driver to your working dir
+
 Create a lan party:
 
     cargo tauri dev
