@@ -1,4 +1,4 @@
-use std::{net::Ipv4Addr, time::Duration};
+use std::{collections::BTreeMap, net::Ipv4Addr, time::Duration};
 
 use distributed_topic_tracker::{
     AutoDiscoveryGossip, GossipReceiver, GossipSender, RecordPublisher, Topic, TopicId,
@@ -254,14 +254,23 @@ impl Router {
 
     pub async fn get_peers(&self) -> Result<Vec<(NodeId, Option<Ipv4Addr>)>> {
         self.api.call(act!(actor => async move {
-            let mut peers = vec![];
-            let sync_peers = actor.doc.get_sync_peers().await?;
-            for pub_key in sync_peers.iter() {
-                let node_id = iroh::PublicKey::from_bytes(&pub_key.clone().as_slice()[0])?;
-                let ip = actor.get_ip_from_node_id(node_id).await.ok();
-                peers.push((node_id, ip));
+            let mut map: BTreeMap<NodeId, Option<Ipv4Addr>> = BTreeMap::new();
+
+            if let Ok(assignments) = actor.read_all_ip_assignments().await {
+                for a in assignments {
+                    map.insert(a.node_id, Some(a.ip));
+                }
             }
-            Ok(peers)
+
+            if let Ok(cands) = actor.read_all_ip_candidates().await {
+                for c in cands {
+                    map.entry(c.node_id).or_insert(None);
+                }
+            }
+
+            map.remove(&actor.node_id);
+
+            Ok(map.into_iter().collect())
         })).await
     }
 
