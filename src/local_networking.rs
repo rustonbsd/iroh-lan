@@ -1,11 +1,11 @@
 use anyhow::Result;
 use pnet_packet::{Packet, ip::IpNextHeaderProtocols, ipv4::Ipv4Packet};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
 use std::{fmt::Debug, net::Ipv4Addr};
+use tracing::debug;
 use tun_rs::{AsyncDevice, DeviceBuilder, Layer};
 
-use actor_helper::{act, Action, Handle};
+use actor_helper::{Action, Handle, act};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Ipv4Pkg(Vec<u8>);
@@ -59,11 +59,15 @@ impl Debug for TunActor {
 }
 
 impl Tun {
-    pub fn new(
+    pub async fn new(
         free_ip_ending: (u8, u8),
         to_remote_writer: tokio::sync::broadcast::Sender<Ipv4Pkg>,
     ) -> Result<Self> {
         let ip = Ipv4Addr::new(172, 22, free_ip_ending.0, free_ip_ending.1);
+
+        #[cfg(target_os = "windows")]
+        dll_export().await?;
+
         let dev = DeviceBuilder::new()
             // .name("feth0")
             .ipv4(ip, 24, None)
@@ -71,7 +75,7 @@ impl Tun {
             .mtu(1280)
             .build_async()?;
 
-        let (api, rx) = Handle::<TunActor>::channel(1024*16);
+        let (api, rx) = Handle::<TunActor>::channel(1024 * 16);
 
         tokio::spawn(async move {
             let mut actor = TunActor {
@@ -88,25 +92,20 @@ impl Tun {
     }
 
     pub async fn write(&self, pkg: Ipv4Pkg) -> Result<()> {
-        self.api
-            .call(act!(actor => actor.write_to_tun(pkg)))
-            .await
+        self.api.call(act!(actor => actor.write_to_tun(pkg))).await
     }
 
     pub async fn subscribe(&self) -> Result<tokio::sync::broadcast::Receiver<Ipv4Pkg>> {
-        self.api
-            .call(act!(actor => actor.subscribe()))
-            .await
+        self.api.call(act!(actor => actor.subscribe())).await
     }
 
     pub async fn close(&self) -> Result<()> {
         self.api
-            .call(act!(actor => 
+            .call(act!(actor =>
                 actor.close()
             ))
             .await
     }
-    
 }
 
 impl TunActor {
@@ -172,4 +171,28 @@ impl TunActor {
         let _ = &self.dev;
         Ok(())
     }
+}
+
+#[cfg(all(windows, target_arch = "x86"))]
+const WINTUN_DLL_EMBEDDED: &[u8] = include_bytes!("../dependencies/wintun/bin/x86/wintun.dll");
+#[cfg(all(windows, target_arch = "x86_64"))]
+const WINTUN_DLL_EMBEDDED: &[u8] = include_bytes!("../dependencies/wintun/bin/amd64/wintun.dll");
+#[cfg(all(windows, target_arch = "aarch64"))]
+const WINTUN_DLL_EMBEDDED: &[u8] = include_bytes!("../dependencies/wintun/bin/arm64/wintun.dll");
+#[cfg(all(windows, target_arch = "arm"))]
+const WINTUN_DLL_EMBEDDED: &[u8] = include_bytes!("../dependencies/wintun/bin/arm/wintun.dll");
+
+#[cfg(target_os = "windows")]
+async fn dll_export() -> anyhow::Result<()> {
+    let working_dir = std::env::current_exe()?
+        .parent()
+        .ok_or(anyhow::anyhow!("Failed to get parent directory"))?
+        .to_path_buf();
+    let dll_path = working_dir.join("wintun.dll");
+    if tokio::fs::try_exists(dll_path.clone()).await? {
+        return Ok(());
+    } else {
+        tokio::fs::write(&dll_path, WINTUN_DLL_EMBEDDED).await?;
+    }
+    Ok(())
 }

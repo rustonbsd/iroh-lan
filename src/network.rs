@@ -165,7 +165,7 @@ impl Actor for NetworkActor {
                 // init tun after ip is assigned
                 _ = ip_tick.tick(), if self.tun.is_none() && matches!(self.router.get_ip_state().await, Ok(RouterIp::AssignedIp(_))) => {
                     if let Ok(RouterIp::AssignedIp(ip)) = self.router.get_ip_state().await {
-                        if let Ok(tun) = Tun::new((ip.octets()[2],ip.octets()[3]), self._local_to_direct_tx.clone()) {
+                        if let Ok(tun) = Tun::new((ip.octets()[2],ip.octets()[3]), self._local_to_direct_tx.clone()).await {
                             self.tun = Some(tun);
                         }
                     }
