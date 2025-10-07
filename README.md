@@ -114,10 +114,10 @@ Create a lan party:
 ## TODOs
 
 - [ ] fix rare "missed peer bug"
-- [ ] cicd for win, mac and linux (maybe bsd)
+- [x] cicd for win, mac and linux (maybe bsd)
 - [ ] optimize release build and commit tauri dest/ to enable `cargo install iroh-lan-ui` or smth similar (so users can build and run without pnpm and node)
 - [ ] professionalize readme.md
-- [ ] release first version
+- [x] release first version
 - [ ] write a github pages entry about this with pictures and a video tutorial using `minetest`
 
 
