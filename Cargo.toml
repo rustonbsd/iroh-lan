@@ -1,7 +1,15 @@
 [package]
 name = "iroh-lan"
+description = "lan party with iroh (like hamachi)"
+license = "MIT"
+authors = ["Zacharias Boehler <rustonbsd@mailfence.com>"]
+repository = "https://github.com/rustonbsd/iroh-lan"
+readme = "README.md"
+keywords = ["networking"]
+categories = ["network-programming"]
 version = "0.1.0"
 edition = "2024"
+
 
 [dependencies]
 anyhow = "1.0.99"
