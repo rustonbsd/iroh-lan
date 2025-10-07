@@ -23,11 +23,11 @@ jobs:
       matrix:
         platform:
           # Windows targets
-          # - name: Windows x86_64
-          #   runs-on: windows-latest
-          #   target: x86_64-pc-windows-msvc
-          #   ext: ".exe"
-          #   os_suffix: "windows-x86_64"
+          - name: Windows x86_64
+            runs-on: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+            os_suffix: "windows-x86_64"
           # - name: Windows i686 (32-bit)
           #   runs-on: windows-latest
           #   target: i686-pc-windows-msvc
@@ -57,16 +57,16 @@ jobs:
           #   os_suffix: "linux-arm64"
 
           # macOS targets
-          # - name: macOS x86_64
-          #   runs-on: macos-latest
-          #   target: x86_64-apple-darwin
-          #   ext: ""
-          #   os_suffix: "macos-x86_64"
-          # - name: macOS ARM64 (Apple Silicon)
-          #   runs-on: macos-latest
-          #   target: aarch64-apple-darwin
-          #   ext: ""
-          #   os_suffix: "macos-arm64"
+          - name: macOS x86_64
+            runs-on: macos-latest
+            target: x86_64-apple-darwin
+            ext: ""
+            os_suffix: "macos-x86_64"
+          - name: macOS ARM64 (Apple Silicon)
+            runs-on: macos-latest
+            target: aarch64-apple-darwin
+            ext: ""
+            os_suffix: "macos-arm64"
 
     steps:
       - name: Checkout
@@ -179,12 +179,37 @@ jobs:
 
           ls -lh release-assets/
 
-      - name: Create Release
+      - name: Create Release Draft
         uses: softprops/action-gh-release@v1
         with:
           files: release-assets/*
-          draft: false
+          draft: true
           prerelease: false
           generate_release_notes: true
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## iroh-lan UI Release ${{ github.ref_name }}
+
+            ### Downloads
+
+            **Windows:**
+            - `iroh-lan-ui-windows-x86_64.exe` - Windows 64-bit (Intel/AMD)
+
+            **Linux:**
+            - `iroh-lan-ui-linux-x86_64` - Linux 64-bit (Intel/AMD)
+
+            **macOS:**
+            - `iroh-lan-ui-macos-x86_64` - macOS Intel
+            - `iroh-lan-ui-macos-arm64` - macOS Apple Silicon (M1/M2/M3)
+
+            ### Installation
+
+            1. Download the appropriate binary for your platform
+            2. Make it executable (Linux/macOS): `chmod +x iroh-lan-ui-*`
+            3. Run the application
+
+            ---
+
+            **Note:** Execution requires admin/sudo rights to create the tun network interface. This is a standalone binary with no dependencies required.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
