@@ -1,0 +1,329 @@
+name: Build and Release iroh-lan
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-examples:
+    name: Build ${{ matrix.platform.name }}
+    runs-on: ${{ matrix.platform.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          # Windows targets
+          - name: Windows x86_64
+            runs-on: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+            os_suffix: "windows-x86_64"
+          - name: Windows i686 (32-bit)
+            runs-on: windows-latest
+            target: i686-pc-windows-msvc
+            ext: ".exe"
+            os_suffix: "windows-i686"
+          - name: Windows ARM64
+            runs-on: windows-latest
+            target: aarch64-pc-windows-msvc
+            ext: ".exe"
+            os_suffix: "windows-arm64"
+
+          # Linux targets
+          - name: Linux x86_64
+            runs-on: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            ext: ""
+            os_suffix: "linux-x86_64"
+          - name: Linux i686 (32-bit)
+            runs-on: ubuntu-latest
+            target: i686-unknown-linux-musl
+            ext: ""
+            os_suffix: "linux-i686"
+          - name: Linux ARM64
+            runs-on: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            ext: ""
+            os_suffix: "linux-arm64"
+
+          # macOS targets
+          - name: macOS x86_64
+            runs-on: macos-latest
+            target: x86_64-apple-darwin
+            ext: ""
+            os_suffix: "macos-x86_64"
+          - name: macOS ARM64 (Apple Silicon)
+            runs-on: macos-latest
+            target: aarch64-apple-darwin
+            ext: ""
+            os_suffix: "macos-arm64"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform.target }}-examples
+
+      - name: Build examples with cross
+        uses: houseabsolute/actions-rust-cross@v0
+        with:
+          command: build
+          target: ${{ matrix.platform.target }}
+          args: --locked --release --examples
+          strip: true
+
+      - name: Prepare binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="${{ matrix.platform.target }}"
+          EXT="${{ matrix.platform.ext }}"
+          OS_SUFFIX="${{ matrix.platform.os_suffix }}"
+
+          OUTDIR="dist/${OS_SUFFIX}"
+          mkdir -p "${OUTDIR}"
+
+          # Build participant example
+          PARTICIPANT_SRC="target/${TARGET}/release/examples/participant${EXT}"
+          if [ -f "${PARTICIPANT_SRC}" ]; then
+            cp "${PARTICIPANT_SRC}" "${OUTDIR}/iroh-lan-participant-${OS_SUFFIX}${EXT}"
+            chmod +x "${OUTDIR}/iroh-lan-participant-${OS_SUFFIX}${EXT}" || true
+          else
+            echo "Warning: participant binary not found at ${PARTICIPANT_SRC}"
+          fi
+
+          # Build creator example
+          CREATOR_SRC="target/${TARGET}/release/examples/creator${EXT}"
+          if [ -f "${CREATOR_SRC}" ]; then
+            cp "${CREATOR_SRC}" "${OUTDIR}/iroh-lan-creator-${OS_SUFFIX}${EXT}"
+            chmod +x "${OUTDIR}/iroh-lan-creator-${OS_SUFFIX}${EXT}" || true
+          else
+            echo "Warning: creator binary not found at ${CREATOR_SRC}"
+          fi
+
+          echo "Resulting files:"
+          ls -la "${OUTDIR}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: iroh-lan-examples-${{ matrix.platform.os_suffix }}
+          path: dist/${{ matrix.platform.os_suffix }}/*
+          retention-days: 7
+
+  build-tauri:
+    name: Build Tauri ${{ matrix.platform.name }}
+    runs-on: ${{ matrix.platform.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          # Windows targets
+          - name: Windows x86_64
+            runs-on: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+            os_suffix: "windows-x86_64"
+          - name: Windows i686 (32-bit)
+            runs-on: windows-latest
+            target: i686-pc-windows-msvc
+            ext: ".exe"
+            os_suffix: "windows-i686"
+          - name: Windows ARM64
+            runs-on: windows-latest
+            target: aarch64-pc-windows-msvc
+            ext: ".exe"
+            os_suffix: "windows-arm64"
+
+          # Linux targets
+          - name: Linux x86_64
+            runs-on: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+            os_suffix: "linux-x86_64"
+          - name: Linux i686 (32-bit)
+            runs-on: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            ext: ""
+            os_suffix: "linux-i686"
+          - name: Linux ARM64
+            runs-on: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            ext: ""
+            os_suffix: "linux-arm64"
+
+          # macOS targets
+          - name: macOS x86_64
+            runs-on: macos-latest
+            target: x86_64-apple-darwin
+            ext: ""
+            os_suffix: "macos-x86_64"
+          - name: macOS ARM64 (Apple Silicon)
+            runs-on: macos-latest
+            target: aarch64-apple-darwin
+            ext: ""
+            os_suffix: "macos-arm64"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (Ubuntu only)
+        if: matrix.platform.runs-on == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 8
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version '^2.0.0'
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform.target }}-tauri
+          workspaces: ui/src-tauri
+
+      - name: Install frontend dependencies
+        working-directory: ui
+        run: pnpm install
+
+      - name: Build Tauri app
+        working-directory: ui/src-tauri
+        run: cargo tauri build --target ${{ matrix.platform.target }}
+
+      - name: Prepare Tauri binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="${{ matrix.platform.target }}"
+          EXT="${{ matrix.platform.ext }}"
+          OS_SUFFIX="${{ matrix.platform.os_suffix }}"
+
+          OUTDIR="dist-tauri/${OS_SUFFIX}"
+          mkdir -p "${OUTDIR}"
+
+          # Find and copy the Tauri binary
+          TAURI_BIN="ui/src-tauri/target/${TARGET}/release/iroh-lan-ui${EXT}"
+          if [ -f "${TAURI_BIN}" ]; then
+            cp "${TAURI_BIN}" "${OUTDIR}/iroh-lan-ui-${OS_SUFFIX}${EXT}"
+            chmod +x "${OUTDIR}/iroh-lan-ui-${OS_SUFFIX}${EXT}" || true
+          else
+            echo "Warning: Tauri binary not found at ${TAURI_BIN}"
+            echo "Searching for binary..."
+            find ui/src-tauri/target/${TARGET}/release -type f -name "iroh-lan-ui*" || true
+          fi
+
+          echo "Resulting files:"
+          ls -la "${OUTDIR}" || true
+
+      - name: Upload Tauri artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: iroh-lan-ui-${{ matrix.platform.os_suffix }}
+          path: dist-tauri/${{ matrix.platform.os_suffix }}/*
+          retention-days: 7
+
+  create-release:
+    name: Create Release
+    needs: [build-examples, build-tauri]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+
+          # Package example binaries
+          for dir in artifacts/iroh-lan-examples-*/; do
+            if [ -d "$dir" ]; then
+              platform=$(basename "$dir" | sed 's/iroh-lan-examples-//')
+              cd "$dir"
+              if [[ "$platform" == windows-* ]]; then
+                zip -r "../../release-assets/iroh-lan-examples-${platform}.zip" .
+              else
+                tar czf "../../release-assets/iroh-lan-examples-${platform}.tar.gz" .
+              fi
+              cd -
+            fi
+          done
+
+          # Package Tauri UI binaries
+          for dir in artifacts/iroh-lan-ui-*/; do
+            if [ -d "$dir" ]; then
+              platform=$(basename "$dir" | sed 's/iroh-lan-ui-//')
+              cd "$dir"
+              if [[ "$platform" == windows-* ]]; then
+                zip -r "../../release-assets/iroh-lan-ui-${platform}.zip" .
+              else
+                tar czf "../../release-assets/iroh-lan-ui-${platform}.tar.gz" .
+              fi
+              cd -
+            fi
+          done
+
+          ls -lh release-assets/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release-assets/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
