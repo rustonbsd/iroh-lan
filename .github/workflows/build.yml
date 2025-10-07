@@ -23,21 +23,21 @@ jobs:
       matrix:
         platform:
           # Windows targets
-          - name: Windows x86_64
-            runs-on: windows-latest
-            target: x86_64-pc-windows-msvc
-            ext: ".exe"
-            os_suffix: "windows-x86_64"
-          - name: Windows i686 (32-bit)
-            runs-on: windows-latest
-            target: i686-pc-windows-msvc
-            ext: ".exe"
-            os_suffix: "windows-i686"
-          - name: Windows ARM64
-            runs-on: windows-latest
-            target: aarch64-pc-windows-msvc
-            ext: ".exe"
-            os_suffix: "windows-arm64"
+          # - name: Windows x86_64
+          #   runs-on: windows-latest
+          #   target: x86_64-pc-windows-msvc
+          #   ext: ".exe"
+          #   os_suffix: "windows-x86_64"
+          # - name: Windows i686 (32-bit)
+          #   runs-on: windows-latest
+          #   target: i686-pc-windows-msvc
+          #   ext: ".exe"
+          #   os_suffix: "windows-i686"
+          # - name: Windows ARM64
+          #   runs-on: windows-latest
+          #   target: aarch64-pc-windows-msvc
+          #   ext: ".exe"
+          #   os_suffix: "windows-arm64"
 
           # Linux targets
           - name: Linux x86_64
@@ -45,28 +45,28 @@ jobs:
             target: x86_64-unknown-linux-gnu
             ext: ""
             os_suffix: "linux-x86_64"
-          - name: Linux i686 (32-bit)
-            runs-on: ubuntu-latest
-            target: i686-unknown-linux-gnu
-            ext: ""
-            os_suffix: "linux-i686"
-          - name: Linux ARM64
-            runs-on: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            ext: ""
-            os_suffix: "linux-arm64"
+          # - name: Linux i686 (32-bit)
+          #   runs-on: ubuntu-latest
+          #   target: i686-unknown-linux-gnu
+          #   ext: ""
+          #   os_suffix: "linux-i686"
+          # - name: Linux ARM64
+          #   runs-on: ubuntu-latest
+          #   target: aarch64-unknown-linux-gnu
+          #   ext: ""
+          #   os_suffix: "linux-arm64"
 
           # macOS targets
-          - name: macOS x86_64
-            runs-on: macos-latest
-            target: x86_64-apple-darwin
-            ext: ""
-            os_suffix: "macos-x86_64"
-          - name: macOS ARM64 (Apple Silicon)
-            runs-on: macos-latest
-            target: aarch64-apple-darwin
-            ext: ""
-            os_suffix: "macos-arm64"
+          # - name: macOS x86_64
+          #   runs-on: macos-latest
+          #   target: x86_64-apple-darwin
+          #   ext: ""
+          #   os_suffix: "macos-x86_64"
+          # - name: macOS ARM64 (Apple Silicon)
+          #   runs-on: macos-latest
+          #   target: aarch64-apple-darwin
+          #   ext: ""
+          #   os_suffix: "macos-arm64"
 
     steps:
       - name: Checkout
