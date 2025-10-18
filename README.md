@@ -1,12 +1,13 @@
 # iroh-lan
 
-Have a lan party with iroh + tun cross platform
+Have a lan party with iroh (iroh-lan = hamachi - account - install)
 
-Working work in progress!
+Just download the released binaries or build it on Windows, MacOs and Linux and have your self a lan party.
 
 Status
 - Transport: overhauled and fully working
 - Tauri UI: working, no pre-builds yet (node and pnpm required)
+- **not working yet** cargo install iroh-lan will not give you the ui app. atm only in github releases.
 
 # UI
 
