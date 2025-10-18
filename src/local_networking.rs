@@ -38,13 +38,13 @@ impl Ipv4Pkg {
 
 #[derive(Debug, Clone)]
 pub struct Tun {
-    api: Handle<TunActor>,
+    api: Handle<TunActor, anyhow::Error>,
 }
 
 struct TunActor {
     ip: Ipv4Addr,
     dev: AsyncDevice,
-    rx: tokio::sync::mpsc::Receiver<Action<TunActor>>,
+    rx: actor_helper::Receiver<Action<TunActor>>,
     to_remote_writer: tokio::sync::broadcast::Sender<Ipv4Pkg>,
     _keep_alive_to_remote_writer: tokio::sync::broadcast::Receiver<Ipv4Pkg>,
 }
@@ -74,7 +74,7 @@ impl Tun {
             .mtu(1280)
             .build_async()?;
 
-        let (api, rx) = Handle::<TunActor>::channel(1024 * 16);
+        let (api, rx) = Handle::channel();
 
         tokio::spawn(async move {
             let mut actor = TunActor {
@@ -114,7 +114,7 @@ impl TunActor {
             tokio::select! {
 
                 // Handle API actions
-                Some(action) = self.rx.recv() => {
+                Ok(action) = self.rx.recv_async() => {
                     action(self).await;
                 }
                 Ok(len) = self.dev.recv(&mut dev_buf) => {

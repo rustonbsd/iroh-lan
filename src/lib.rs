@@ -1,13 +1,12 @@
 //mod direct_connect;
 //mod local_networking;
-mod local_networking;
-mod router;
-mod direct_connect;
 mod connection;
+mod direct_connect;
+mod local_networking;
 pub mod network;
+mod router;
 
-
-pub use local_networking::Tun;
-pub use direct_connect::{Direct, DirectMessage};
 pub use connection::ConnState;
-pub use router::{Router, RouterIp, IpAssignment, IpCandidate};
+pub use direct_connect::{Direct, DirectMessage};
+pub use local_networking::Tun;
+pub use router::{IpAssignment, IpCandidate, Router, RouterIp};

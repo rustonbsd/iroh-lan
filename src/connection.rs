@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::DirectMessage;
-use actor_helper::{Action, Actor, Handle, act, act_ok};
+use actor_helper::{Action, Actor, Handle, Receiver, act, act_ok};
 use anyhow::Result;
 use iroh::{
     Endpoint,
@@ -24,7 +24,7 @@ const RECONNECT_BACKOFF_BASE: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub struct Conn {
-    api: Handle<ConnActor>,
+    api: Handle<ConnActor, anyhow::Error>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,8 +38,8 @@ pub enum ConnState {
 
 #[derive(Debug)]
 struct ConnActor {
-    rx: tokio::sync::mpsc::Receiver<Action<ConnActor>>,
-    self_handle: Handle<ConnActor>,
+    rx: Receiver<Action<ConnActor>>,
+    self_handle: Handle<ConnActor, anyhow::Error>,
     state: ConnState,
 
     // all of these need to be optionals so that we can create an empty
@@ -73,7 +73,7 @@ impl Conn {
         recv_stream: RecvStream,
         external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
     ) -> Result<Self> {
-        let (api, rx) = Handle::<ConnActor>::channel(1024);
+        let (api, rx) = Handle::channel();
         let mut actor = ConnActor::new(
             rx,
             api.clone(),
@@ -94,7 +94,7 @@ impl Conn {
         node_id: NodeId,
         external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
     ) -> Self {
-        let (api, rx) = Handle::<ConnActor>::channel(1024);
+        let (api, rx) = Handle::channel();
         let mut actor = ConnActor::new(
             rx,
             api.clone(),
@@ -154,7 +154,7 @@ impl Conn {
     }
 }
 
-impl Actor for ConnActor {
+impl Actor<anyhow::Error> for ConnActor {
     async fn run(&mut self) -> Result<()> {
         let mut reconnect_ticker = tokio::time::interval(Duration::from_millis(500));
         let mut notification_ticker = tokio::time::interval(Duration::from_millis(500));
@@ -164,7 +164,7 @@ impl Actor for ConnActor {
 
         loop {
             tokio::select! {
-                Some(action) = self.rx.recv() => {
+                Ok(action) = self.rx.recv_async() => {
                     action(self).await;
                 }
                 _ = reconnect_ticker.tick(), if self.state != ConnState::Closed => {
@@ -233,8 +233,8 @@ impl Actor for ConnActor {
 impl ConnActor {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
-        rx: tokio::sync::mpsc::Receiver<Action<ConnActor>>,
-        self_handle: Handle<ConnActor>,
+        rx: Receiver<Action<ConnActor>>,
+        self_handle: Handle<ConnActor, anyhow::Error>,
         external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
         endpoint: Endpoint,
         conn_node_id: NodeId,

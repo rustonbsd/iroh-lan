@@ -9,14 +9,14 @@ use crate::{connection::Conn, local_networking::Ipv4Pkg};
 
 #[derive(Debug, Clone)]
 pub struct Direct {
-    api: Handle<DirectActor>,
+    api: Handle<DirectActor, anyhow::Error>,
 }
 
 #[derive(Debug)]
 struct DirectActor {
     peers: HashMap<NodeId, Conn>,
     endpoint: iroh::endpoint::Endpoint,
-    rx: tokio::sync::mpsc::Receiver<Action<DirectActor>>,
+    rx: actor_helper::Receiver<Action<DirectActor>>,
     direct_connect_tx: tokio::sync::broadcast::Sender<DirectMessage>,
 }
 
@@ -32,7 +32,7 @@ impl Direct {
         endpoint: iroh::endpoint::Endpoint,
         direct_connect_tx: tokio::sync::broadcast::Sender<DirectMessage>,
     ) -> Self {
-        let (api, rx) = Handle::<DirectActor>::channel(1024 * 16);
+        let (api, rx) = Handle::channel();
         let mut actor = DirectActor {
             peers: HashMap::new(),
             endpoint,
@@ -77,7 +77,7 @@ impl DirectActor {
     async fn run(&mut self) {
         loop {
             tokio::select! {
-                Some(action) = self.rx.recv() => {
+                Ok(action) = self.rx.recv_async() => {
                     action(self).await;
                 }
                 _ = tokio::signal::ctrl_c() => {
