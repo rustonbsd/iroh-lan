@@ -2,12 +2,11 @@
 
 Have a lan party with iroh (iroh-lan = hamachi - account - install)
 
-Just download the released binaries or build it on Windows, MacOs and Linux and have your self a lan party.
+Just [download](https://github.com/rustonbsd/iroh-lan/releases) the released binaries or build it on Windows, MacOs and Linux and have your self a lan party.
 
-Status
-- Transport: overhauled and fully working
-- Tauri UI: working, no pre-builds yet (node and pnpm required)
-- **not working yet** cargo install iroh-lan will not give you the ui app. atm only in github releases.
+# Video
+
+[![Youtube Video](https://github.com/user-attachments/assets/3d503516-65b6-49b5-a78f-2be2257f430f)](https://www.youtube.com/watch?v=DNtDLPD3WrE)
 
 ## Download
 
@@ -126,11 +125,10 @@ Create a lan party:
 
 ## TODOs
 
-- [ ] fix rare "missed peer bug"
 - [x] cicd for win, mac and linux (maybe bsd)
+- [x] release first version
 - [ ] optimize release build and commit tauri dest/ to enable `cargo install iroh-lan-ui` or smth similar (so users can build and run without pnpm and node)
 - [ ] professionalize readme.md
-- [x] release first version
 - [ ] write a github pages entry about this with pictures and a video tutorial using `minetest`
 
 
