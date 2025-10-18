@@ -9,6 +9,18 @@ Status
 - Tauri UI: working, no pre-builds yet (node and pnpm required)
 - **not working yet** cargo install iroh-lan will not give you the ui app. atm only in github releases.
 
+## Download
+
+Pre-built binaries are available from the [Releases page](https://github.com/rustonbsd/iroh-lan/releases). All builds are produced by GitHub Actions CI/CD.
+
+**Windows**: Download `iroh-lan-ui-windows-x86_64.exe`  
+**macOS**: Download `iroh-lan-ui-macos-arm64` (Apple Silicon) or `iroh-lan-ui-macos-x86_64` (Intel)  
+**Linux**: Download `iroh-lan-ui-linux-x86_64`
+
+On Linux and macOS, make the binary executable: `chmod +x iroh-lan-ui-*`
+
+Requires admin/sudo rights to create the network interface. No accounts or dependencies required.
+
 # UI
 
 The iroh-lan UI is designed for zero-friction, ephemeral networking: no accounts, no central servers, no device lists. Name a network, choose a password, and you’re on a private L3 LAN with anyone who does the same, created out of thin air and gone when you leave.
