@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use actor_helper::{act, act_ok, Action, Actor, Handle};
+use actor_helper::{Action, Actor, Handle, act, act_ok};
 use anyhow::Result;
 use iroh::{Endpoint, SecretKey};
 use iroh_blobs::store::mem::MemStore;
@@ -8,18 +8,16 @@ use iroh_docs::protocol::Docs;
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
 use tracing::warn;
 
-use crate::{ 
-    local_networking::Ipv4Pkg, router::RouterIp, Direct, DirectMessage, Router, Tun
-};
+use crate::{Direct, DirectMessage, Router, Tun, local_networking::Ipv4Pkg, router::RouterIp};
 
 #[derive(Debug, Clone)]
 pub struct Network {
-    api: Handle<NetworkActor>,
+    api: Handle<NetworkActor, anyhow::Error>,
 }
 
 #[derive(Debug)]
 struct NetworkActor {
-    rx: tokio::sync::mpsc::Receiver<Action<NetworkActor>>,
+    rx: actor_helper::Receiver<Action<NetworkActor>>,
 
     router: Router,
     direct: Direct,
@@ -38,7 +36,7 @@ struct NetworkActor {
 
 impl Network {
     pub async fn new(name: &str, password: &str) -> Result<Self> {
-        let secret = SecretKey::generate(&mut rand::thread_rng());
+        let secret = SecretKey::generate(&mut rand::rng());
 
         let endpoint = Endpoint::builder()
             .discovery_n0()
@@ -69,7 +67,7 @@ impl Network {
             .accept(iroh_docs::ALPN, docs.clone())
             .accept(
                 iroh_blobs::ALPN,
-                iroh_blobs::BlobsProtocol::new(&blobs, endpoint.clone(), None),
+                iroh_blobs::BlobsProtocol::new(&blobs, None),
             )
             .spawn();
 
@@ -84,7 +82,7 @@ impl Network {
             .build()
             .await?;
 
-        let (api, rx) = Handle::<NetworkActor>::channel(1024 * 16);
+        let (api, rx) = Handle::channel();
         tokio::spawn(async move {
             let (to_remote_writer, to_remote_reader) = tokio::sync::broadcast::channel(1024 * 16);
             let mut actor = NetworkActor {
@@ -125,10 +123,8 @@ impl Network {
             .await
     }
 
-    pub async fn get_peers(&self) -> Result<Vec<(iroh::NodeId,Option<std::net::Ipv4Addr>)>> {
-        self.api
-            .call(act!(actor => actor.router.get_peers()))
-            .await
+    pub async fn get_peers(&self) -> Result<Vec<(iroh::NodeId, Option<std::net::Ipv4Addr>)>> {
+        self.api.call(act!(actor => actor.router.get_peers())).await
     }
 
     pub async fn get_direct_handle(&self) -> Result<Direct> {
@@ -140,22 +136,24 @@ impl Network {
     pub async fn close(&self) -> Result<()> {
         warn!("Closing network TODO!");
 
-        self.api.call(act_ok!(actor => async move {
-            let _ = actor._router.shutdown().await;
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            //actor._endpoint.close().await;
-        })).await
+        self.api
+            .call(act_ok!(actor => async move {
+                let _ = actor._router.shutdown().await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                //actor._endpoint.close().await;
+            }))
+            .await
     }
 }
 
-impl Actor for NetworkActor {
+impl Actor<anyhow::Error> for NetworkActor {
     async fn run(&mut self) -> Result<()> {
         let mut ip_tick = tokio::time::interval(Duration::from_millis(500));
         ip_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
-                Some(action) = self.rx.recv() => {
+                Ok(action) = self.rx.recv_async() => {
                     action(self).await;
                 }
                 _ = tokio::signal::ctrl_c() => {

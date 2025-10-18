@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
         if writer.write(&buf[..n]).await.is_err() {
             break;
         }
-        println!("echoed {} bytes to {}", n, local);
+        println!("echoed {n} bytes to {local}");
     }
 
     Ok(())

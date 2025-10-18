@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, net::Ipv4Addr, time::Duration};
 use distributed_topic_tracker::{
     AutoDiscoveryGossip, GossipReceiver, GossipSender, RecordPublisher, Topic, TopicId,
 };
+use ed25519_dalek::VerifyingKey;
 use futures::StreamExt;
 use iroh::{NodeAddr, NodeId};
 use iroh_blobs::store::mem::MemStore;
@@ -20,9 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use tracing::{debug, info};
 
-use actor_helper::{
-    act, act_ok, Action, Actor, Handle
-};
+use actor_helper::{Action, Actor, Handle, act, act_ok};
 
 #[derive(Debug, Clone)]
 pub struct Builder {
@@ -111,7 +110,7 @@ impl Builder {
 
         let record_publisher = RecordPublisher::new(
             TopicId::new(z32::encode(&topic_hash)),
-            endpoint.node_id(),
+            VerifyingKey::from_bytes(endpoint.node_id().as_bytes())?,
             self.secret_key.secret().clone(),
             None,
             secret_initials,
@@ -144,7 +143,6 @@ impl Builder {
             })
             .await?;
 
-
         while match doc.get_sync_peers().await {
             Ok(Some(peers)) => peers.is_empty(),
             Ok(None) => true,
@@ -154,7 +152,7 @@ impl Builder {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        let (api, rx) = Handle::<crate::router::RouterActor>::channel(1024 * 16);
+        let (api, rx) = Handle::channel();
         tokio::spawn(async move {
             let mut router_actor = RouterActor {
                 _gossip_sender: gossip_sender,
@@ -180,7 +178,7 @@ impl Default for Builder {
         Self {
             creator_mode: false,
             entry_name: String::default(),
-            secret_key: SecretKey::generate(&mut rand::thread_rng()),
+            secret_key: SecretKey::generate(&mut rand::rng()),
             password: String::default(),
             endpoint: None,
             gossip: None,
@@ -192,7 +190,7 @@ impl Default for Builder {
 
 #[derive(Debug, Clone)]
 pub struct Router {
-    api: Handle<RouterActor>,
+    api: Handle<RouterActor, anyhow::Error>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,7 +202,7 @@ pub enum RouterIp {
 
 #[derive(Debug)]
 struct RouterActor {
-    pub(crate) rx: tokio::sync::mpsc::Receiver<Action<RouterActor>>,
+    pub(crate) rx: actor_helper::Receiver<Action<RouterActor>>,
 
     pub _gossip_sender: GossipSender,
     pub _gossip_receiver: GossipReceiver,
@@ -234,11 +232,12 @@ impl Router {
     }
 
     pub async fn get_node_id(&self) -> Result<NodeId> {
-        self.api.call(act_ok!(actor => async move {
-                actor.node_id
-        })).await
+        self.api
+            .call(act_ok!(actor => async move {
+                    actor.node_id
+            }))
+            .await
     }
-
 
     pub async fn get_ip_from_node_id(&self, node_id: NodeId) -> Result<Ipv4Addr> {
         self.api
@@ -253,25 +252,27 @@ impl Router {
     }
 
     pub async fn get_peers(&self) -> Result<Vec<(NodeId, Option<Ipv4Addr>)>> {
-        self.api.call(act!(actor => async move {
-            let mut map: BTreeMap<NodeId, Option<Ipv4Addr>> = BTreeMap::new();
+        self.api
+            .call(act!(actor => async move {
+                let mut map: BTreeMap<NodeId, Option<Ipv4Addr>> = BTreeMap::new();
 
-            if let Ok(assignments) = actor.read_all_ip_assignments().await {
-                for a in assignments {
-                    map.insert(a.node_id, Some(a.ip));
+                if let Ok(assignments) = actor.read_all_ip_assignments().await {
+                    for a in assignments {
+                        map.insert(a.node_id, Some(a.ip));
+                    }
                 }
-            }
 
-            if let Ok(cands) = actor.read_all_ip_candidates().await {
-                for c in cands {
-                    map.entry(c.node_id).or_insert(None);
+                if let Ok(cands) = actor.read_all_ip_candidates().await {
+                    for c in cands {
+                        map.entry(c.node_id).or_insert(None);
+                    }
                 }
-            }
 
-            map.remove(&actor.node_id);
+                map.remove(&actor.node_id);
 
-            Ok(map.into_iter().collect())
-        })).await
+                Ok(map.into_iter().collect())
+            }))
+            .await
     }
 
     pub async fn close(&self) -> Result<()> {
@@ -279,14 +280,14 @@ impl Router {
     }
 }
 
-impl Actor for RouterActor {
+impl Actor<anyhow::Error> for RouterActor {
     async fn run(&mut self) -> Result<()> {
         let mut ip_tick = tokio::time::interval(Duration::from_millis(500));
         ip_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
-                Some(action) = self.rx.recv() => {
+                Ok(action) = self.rx.recv_async() => {
                     action(self).await;
                 }
                 _ = tokio::signal::ctrl_c() => {
@@ -367,9 +368,7 @@ impl RouterActor {
             .collect::<Vec<_>>()
             .await
             .iter()
-            .filter_map(|entry| {
-                entry.as_ref().ok()
-            })
+            .filter_map(|entry| entry.as_ref().ok())
             .cloned()
             .collect::<Vec<_>>();
 
@@ -392,9 +391,7 @@ impl RouterActor {
             .collect::<Vec<_>>()
             .await
             .iter()
-            .filter_map(|entry| {
-                entry.as_ref().ok()
-            })
+            .filter_map(|entry| entry.as_ref().ok())
             .cloned()
             .collect::<Vec<_>>();
 
@@ -429,7 +426,13 @@ impl RouterActor {
             .await?
             .collect::<Vec<_>>()
             .await;
-        debug!("candidates for {ip}: {:?}", entries.iter().map(|e| e.as_ref().ok().map(|e| e.content_hash())).collect::<Vec<_>>());
+        debug!(
+            "candidates for {ip}: {:?}",
+            entries
+                .iter()
+                .map(|e| e.as_ref().ok().map(|e| e.content_hash()))
+                .collect::<Vec<_>>()
+        );
         let mut candidates = Vec::new();
         for entry in entries.into_iter().flatten() {
             if let Ok(b) = self.blobs.get_bytes(entry.content_hash()).await {
@@ -529,7 +532,7 @@ impl RouterActor {
         match self.my_ip.clone() {
             RouterIp::NoIp => {
                 let next_ip = self.get_next_ip().await?;
-                
+
                 self.my_ip = RouterIp::AquiringIp(
                     self.write_ip_candidate(next_ip, self.node_id).await?,
                     tokio::time::Instant::now(),

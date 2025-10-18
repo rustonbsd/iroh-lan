@@ -34,13 +34,6 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    loop {
-        tokio::select! {
-
-            _ = tokio::signal::ctrl_c() => {
-                break Ok(())
-            }
-        }
-    }
-    //Ok(())
+    let _ = tokio::signal::ctrl_c().await;
+    Ok(())
 }

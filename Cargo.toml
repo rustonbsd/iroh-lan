@@ -1,6 +1,6 @@
 [package]
 name = "iroh-lan"
-description = "lan party with iroh (like hamachi)"
+description = "iroh-lan = hamachi - account - install"
 license = "MIT"
 authors = ["Zacharias Boehler <rustonbsd@mailfence.com>"]
 repository = "https://github.com/rustonbsd/iroh-lan"
@@ -12,28 +12,29 @@ edition = "2024"
 
 
 [dependencies]
-anyhow = "1.0.99"
-distributed-topic-tracker = "0.1.5"
-iroh = "0.91.2"
-iroh-gossip = "0.91.0"
-iroh-docs = "0.91.0"
-iroh-blobs = "0.93.0"
-runas = "1.2.0"
-tokio = "1.47.1"
-nix = { version = "0.30.1", features = ["process"] }
-self-runas = "0.1.0"
-rand = "0.8"
-pnet_packet = "0.35.0"
-tun-rs = { version = "2.7.2", features = ["async"] }
-serde = "1.0.219"
-futures = "0.3.31"
-postcard = { version = "1.1.3", features = ["use-std"] }
-sha2 = "0.10.9"
-z32 = "1.3.0"
+anyhow = "1"
+distributed-topic-tracker = "0.2"
+ed25519-dalek = "3.0.0-pre.1"
+iroh = "0.93"
+iroh-gossip = "0.93"
+iroh-docs = "0.93"
+iroh-blobs = "0.95"
+runas = "1"
+tokio = "1"
+nix = { version = "0.30", features = ["process"] }
+self-runas = "0.1"
+rand = "0.9"
+pnet_packet = "0.35"
+tun-rs = { version = "2", features = ["async"] }
+serde = "1"
+futures = "0.3"
+postcard = { version = "1", features = ["use-std"] }
+sha2 = "0.10"
+z32 = "1"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-actor-helper = "0.1"
+actor-helper = "0.2"
 
 
 [lib]

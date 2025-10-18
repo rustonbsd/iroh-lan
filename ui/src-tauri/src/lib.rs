@@ -8,6 +8,7 @@ use tracing::{self, info};
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
 static NETWORK: Lazy<Mutex<Option<Network>>> = Lazy::new(|| {
+    #[cfg(debug_assertions)]
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .with_thread_ids(true)
