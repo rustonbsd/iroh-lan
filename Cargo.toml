@@ -7,7 +7,7 @@ repository = "https://github.com/rustonbsd/iroh-lan"
 readme = "README.md"
 keywords = ["networking"]
 categories = ["network-programming"]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 
