@@ -61,7 +61,7 @@ With one or a few peers, you’ll see your assigned IP and the network’s subne
 ![Network running](media/ui/5_network_running.png)
 
 As more peers join, the UI lists them with their virtual IPs and status. Traffic flows directly over iroh using NAT traversal where possible.
-- No relays, accounts or installation required of any kind.
+- No relay setup, accounts or installation required of any kind.
 - Keep the app open to stay reachable, quit to leave and nothing lingers.
 
 I wanted a more convinient hamachi with less bugs:
