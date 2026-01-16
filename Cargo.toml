@@ -25,7 +25,7 @@ nix = { version = "0.30", features = ["process"] }
 self-runas = "0.1"
 rand = "0.9"
 pnet_packet = "0.35"
-tun-rs = { version = "2", features = ["async"] }
+tun-rs = { version = "2.7.7", features = ["async"] }
 serde = "1"
 futures = "0.3"
 postcard = { version = "1", features = ["use-std"] }

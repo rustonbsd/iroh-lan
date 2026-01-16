@@ -50,9 +50,9 @@ impl MyInfo {
             ip: match ip_state {
                 iroh_lan::RouterIp::NoIp => None,
                 iroh_lan::RouterIp::AquiringIp(ip_candidate, _) => {
-                    Some(format!("acquiring {}...", ip_candidate.ip.to_string()))
+                    Some(format!("acquiring {}...", ip_candidate.ip))
                 }
-                iroh_lan::RouterIp::AssignedIp(ipv4_addr) => Some(format!("{}", ipv4_addr)),
+                iroh_lan::RouterIp::AssignedIp(ipv4_addr) => Some(format!("{ipv4_addr}")),
             },
         })
     }
@@ -79,9 +79,9 @@ async fn create_network(name: String, password: String) -> Result<MyInfo, String
 
     *guard = Some(network.clone());
 
-    Ok(MyInfo::from_network(&network)
+    MyInfo::from_network(&network)
         .await
-        .map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Serialize)]
@@ -126,7 +126,7 @@ async fn connection_state() -> Result<ConnectionState, String> {
 async fn my_info() -> Result<MyInfo, String> {
     let guard = NETWORK.lock().await;
     if let Some(network) = guard.as_ref() {
-        MyInfo::from_network(&network)
+        MyInfo::from_network(network)
             .await
             .map_err(|e| e.to_string())
     } else {
@@ -168,15 +168,15 @@ async fn list_peers() -> Result<Vec<PeerInfo>, String> {
 }
 
 #[tauri::command]
-async fn close() -> Result<(), String> {
+async fn close(window: tauri::Window) -> Result<(), String> {
     let mut guard = NETWORK.lock().await;
     if let Some(network) = guard.as_mut() {
         network.close().await.map_err(|e| e.to_string())?;
     }
     *guard = None; // drop
-    std::process::exit(0);
+    
+    window.close().map_err(|e| e.to_string())?;
 
-    #[allow(unreachable_code)]
     Ok(())
 }
 

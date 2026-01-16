@@ -2,8 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use std::process::exit;
 
-use self_runas;
-
 fn main() {
     if !self_runas::is_elevated() {
         let _ = self_runas::admin();
