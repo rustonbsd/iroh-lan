@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use actor_helper::{Action, Actor, Handle, act, act_ok};
 use anyhow::Result;
-use iroh::{Endpoint, SecretKey};
+use iroh::{Endpoint, EndpointId, SecretKey};
 use iroh_blobs::store::mem::MemStore;
 use iroh_docs::protocol::Docs;
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
@@ -36,11 +36,10 @@ struct NetworkActor {
 
 impl Network {
     pub async fn new(name: &str, password: &str) -> Result<Self> {
-        let secret = SecretKey::generate(&mut rand::rng());
+        let secret_key = SecretKey::generate(&mut rand::rng());
 
         let endpoint = Endpoint::builder()
-            .discovery_n0()
-            .secret_key(secret.clone())
+            .secret_key(secret_key.clone())
             .bind()
             .await?;
 
@@ -74,7 +73,7 @@ impl Network {
         let router = crate::Router::builder()
             .entry_name(name)
             .password(password)
-            .secret_key(secret.clone())
+            .secret_key(secret_key)
             .endpoint(endpoint.clone())
             .gossip(gossip)
             .docs(docs)
@@ -117,13 +116,13 @@ impl Network {
             .await
     }
 
-    pub async fn get_node_id(&self) -> Result<iroh::NodeId> {
+    pub async fn get_node_id(&self) -> Result<EndpointId> {
         self.api
             .call(act!(actor => actor.router.get_node_id()))
             .await
     }
 
-    pub async fn get_peers(&self) -> Result<Vec<(iroh::NodeId, Option<std::net::Ipv4Addr>)>> {
+    pub async fn get_peers(&self) -> Result<Vec<(EndpointId, Option<std::net::Ipv4Addr>)>> {
         self.api.call(act!(actor => actor.router.get_peers())).await
     }
 
@@ -173,7 +172,7 @@ impl Actor<anyhow::Error> for NetworkActor {
                     // Tun initialized, route packets
                     if let Ok(ip_pkg) = tun_recv.to_ipv4_packet() {
                         let dest = ip_pkg.get_destination();
-                        if let Ok(to) = self.router.get_node_id_from_ip(dest).await {
+                        if let Ok(to) = self.router.get_endpoint_id_from_ip(dest).await {
                             let _ = self.direct.route_packet(to, DirectMessage::IpPacket(tun_recv)).await;
                         }
                     }

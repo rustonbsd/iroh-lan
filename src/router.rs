@@ -3,9 +3,8 @@ use std::{collections::BTreeMap, net::Ipv4Addr, time::Duration};
 use distributed_topic_tracker::{
     AutoDiscoveryGossip, GossipReceiver, GossipSender, RecordPublisher, Topic, TopicId,
 };
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use futures::StreamExt;
-use iroh::{NodeAddr, NodeId};
 use iroh_blobs::store::mem::MemStore;
 use iroh_docs::{
     AuthorId, Entry, NamespaceSecret,
@@ -15,7 +14,7 @@ use iroh_docs::{
 };
 
 use anyhow::{Context, Result, bail};
-use iroh::{Endpoint, SecretKey};
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use iroh_gossip::net::Gossip;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -108,10 +107,11 @@ impl Builder {
         topic_hasher.update(&secret_initials);
         let topic_hash: [u8; 32] = topic_hasher.finalize()[..32].try_into()?;
 
+        let signing_key = SigningKey::from_bytes(&self.secret_key.to_bytes());
         let record_publisher = RecordPublisher::new(
             TopicId::new(z32::encode(&topic_hash)),
-            VerifyingKey::from_bytes(endpoint.node_id().as_bytes())?,
-            self.secret_key.secret().clone(),
+            VerifyingKey::from_bytes(endpoint.id().as_bytes())?,
+            signing_key,
             None,
             secret_initials,
         );
@@ -130,7 +130,7 @@ impl Builder {
             .neighbors()
             .await
             .iter()
-            .map(|pub_key| NodeAddr::new(*pub_key))
+            .map(|pub_key| EndpointAddr::new(*pub_key))
             .collect::<Vec<_>>();
 
         debug!("[Doc peers]: {:?}", doc_peers);
@@ -160,7 +160,7 @@ impl Builder {
                 author_id,
                 _docs: docs,
                 doc,
-                node_id: endpoint.node_id(),
+                endpoint_id: endpoint.id(),
                 _topic: Some(topic),
                 rx,
                 blobs,
@@ -212,7 +212,7 @@ struct RouterActor {
     pub(crate) doc: Doc,
     pub(crate) author_id: AuthorId,
 
-    pub node_id: NodeId,
+    pub endpoint_id: EndpointId,
     pub(crate) _topic: Option<Topic>,
 
     pub my_ip: RouterIp,
@@ -231,44 +231,44 @@ impl Router {
             .await
     }
 
-    pub async fn get_node_id(&self) -> Result<NodeId> {
+    pub async fn get_node_id(&self) -> Result<EndpointId> {
         self.api
             .call(act_ok!(actor => async move {
-                    actor.node_id
+                    actor.endpoint_id
             }))
             .await
     }
 
-    pub async fn get_ip_from_node_id(&self, node_id: NodeId) -> Result<Ipv4Addr> {
+    pub async fn get_ip_from_endpoint_id(&self, endpoint_id: EndpointId) -> Result<Ipv4Addr> {
         self.api
-            .call(act!(actor => actor.get_ip_from_node_id(node_id)))
+            .call(act!(actor => actor.get_ip_from_endpoint_id(endpoint_id)))
             .await
     }
 
-    pub async fn get_node_id_from_ip(&self, ip: Ipv4Addr) -> Result<NodeId> {
+    pub async fn get_endpoint_id_from_ip(&self, ip: Ipv4Addr) -> Result<EndpointId> {
         self.api
-            .call(act!(actor => actor.get_node_id_from_ip(ip)))
+            .call(act!(actor => actor.get_endpoint_id_from_ip(ip)))
             .await
     }
 
-    pub async fn get_peers(&self) -> Result<Vec<(NodeId, Option<Ipv4Addr>)>> {
+    pub async fn get_peers(&self) -> Result<Vec<(EndpointId, Option<Ipv4Addr>)>> {
         self.api
             .call(act!(actor => async move {
-                let mut map: BTreeMap<NodeId, Option<Ipv4Addr>> = BTreeMap::new();
+                let mut map: BTreeMap<EndpointId, Option<Ipv4Addr>> = BTreeMap::new();
 
                 if let Ok(assignments) = actor.read_all_ip_assignments().await {
                     for a in assignments {
-                        map.insert(a.node_id, Some(a.ip));
+                        map.insert(a.endpoint_id, Some(a.ip));
                     }
                 }
 
                 if let Ok(cands) = actor.read_all_ip_candidates().await {
                     for c in cands {
-                        map.entry(c.node_id).or_insert(None);
+                        map.entry(c.endpoint_id).or_insert(None);
                     }
                 }
 
-                map.remove(&actor.node_id);
+                map.remove(&actor.endpoint_id);
 
                 Ok(map.into_iter().collect())
             }))
@@ -310,13 +310,13 @@ impl Actor<anyhow::Error> for RouterActor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpAssignment {
     pub ip: Ipv4Addr,
-    pub node_id: NodeId,
+    pub endpoint_id: EndpointId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IpCandidate {
     pub ip: Ipv4Addr,
-    pub node_id: NodeId,
+    pub endpoint_id: EndpointId,
 }
 
 async fn entry_to_value<S: for<'a> Deserialize<'a>>(
@@ -347,8 +347,8 @@ fn key_ip_assigned_prefix() -> String {
     "/assigned/ip/".to_string()
 }
 
-fn key_ip_candidate(ip: Ipv4Addr, node_id: NodeId) -> String {
-    format!("/candidates/ip/{ip}/{node_id}")
+fn key_ip_candidate(ip: Ipv4Addr, endpoint_id: EndpointId) -> String {
+    format!("/candidates/ip/{ip}/{endpoint_id}")
 }
 
 fn key_ip_candidate_prefix() -> String {
@@ -415,7 +415,7 @@ impl RouterActor {
                 .context("no assignment found")?
                 .to_vec(),
         )
-        .context("failed to deserialize node id")
+        .context("failed to deserialize endpoint_id")
     }
 
     // Candidate IPs
@@ -446,7 +446,7 @@ impl RouterActor {
     }
 
     // write ip assigned
-    async fn write_ip_assignment(&mut self, ip: Ipv4Addr, node_id: NodeId) -> Result<()> {
+    async fn write_ip_assignment(&mut self, ip: Ipv4Addr, endpoint_id: EndpointId) -> Result<()> {
         if self.read_ip_assignment(ip).await.is_ok() {
             anyhow::bail!("ip already assigned");
         }
@@ -459,19 +459,19 @@ impl RouterActor {
 
         candidates.sort_by_key(|c| {
             let mut hasher = sha2::Sha256::new();
-            hasher.update(c.node_id.as_bytes());
+            hasher.update(c.endpoint_id.as_bytes());
             hasher.update(ip.to_string().as_bytes());
             hasher.finalize()
         });
 
-        if candidates[0].node_id != node_id {
+        if candidates[0].endpoint_id != endpoint_id {
             bail!("not the chosen candidate");
         }
 
         // We are the chosen one!
         // 1. write our ip assignment
         // 2. delete all candidates for this ip
-        let data = postcard::to_stdvec(&IpAssignment { ip, node_id })?;
+        let data = postcard::to_stdvec(&IpAssignment { ip, endpoint_id })?;
         self.doc
             .set_bytes(self.author_id, key_ip_assigned(ip), data)
             .await?;
@@ -485,7 +485,11 @@ impl RouterActor {
     }
 
     // write ip candidate
-    async fn write_ip_candidate(&mut self, ip: Ipv4Addr, node_id: NodeId) -> Result<IpCandidate> {
+    async fn write_ip_candidate(
+        &mut self,
+        ip: Ipv4Addr,
+        endpoint_id: EndpointId,
+    ) -> Result<IpCandidate> {
         // already assigned? don't write
         if self.read_ip_assignment(ip).await.is_ok() {
             anyhow::bail!("ip already assigned");
@@ -495,35 +499,35 @@ impl RouterActor {
         let candidates = self.read_ip_candidates(ip).await.unwrap_or_default();
 
         // if someone else is already a candidate, treat as contested and skip writing
-        if candidates.iter().any(|c| c.node_id != node_id) {
+        if candidates.iter().any(|c| c.endpoint_id != endpoint_id) {
             anyhow::bail!("ip candidate already exists");
         }
 
         // idempotent for our own node_id
-        let candidate = IpCandidate { ip, node_id };
+        let candidate = IpCandidate { ip, endpoint_id };
         let data = postcard::to_stdvec(&candidate)?;
         self.doc
-            .set_bytes(self.author_id, key_ip_candidate(ip, node_id), data)
+            .set_bytes(self.author_id, key_ip_candidate(ip, endpoint_id), data)
             .await?;
         Ok(candidate)
     }
 
-    async fn get_node_id_from_ip(&mut self, ip: Ipv4Addr) -> Result<NodeId> {
+    async fn get_endpoint_id_from_ip(&mut self, ip: Ipv4Addr) -> Result<EndpointId> {
         self.read_all_ip_assignments()
             .await?
             .iter()
             .find(|assignment| assignment.ip == ip)
-            .map(|a| a.node_id)
-            .ok_or_else(|| anyhow::anyhow!("no node id found for ip"))
+            .map(|a| a.endpoint_id)
+            .ok_or_else(|| anyhow::anyhow!("no endpoint_id found for ip"))
     }
 
-    async fn get_ip_from_node_id(&mut self, node_id: NodeId) -> Result<Ipv4Addr> {
+    async fn get_ip_from_endpoint_id(&mut self, endpoint_id: EndpointId) -> Result<Ipv4Addr> {
         self.read_all_ip_assignments()
             .await?
             .iter()
-            .find(|assignment| assignment.node_id == node_id)
+            .find(|assignment| assignment.endpoint_id == endpoint_id)
             .map(|a| a.ip)
-            .ok_or_else(|| anyhow::anyhow!("no ip found for node id"))
+            .ok_or_else(|| anyhow::anyhow!("no ip found for endpoint_id"))
     }
 }
 
@@ -534,7 +538,7 @@ impl RouterActor {
                 let next_ip = self.get_next_ip().await?;
 
                 self.my_ip = RouterIp::AquiringIp(
-                    self.write_ip_candidate(next_ip, self.node_id).await?,
+                    self.write_ip_candidate(next_ip, self.endpoint_id).await?,
                     tokio::time::Instant::now(),
                 );
                 Ok(false)
@@ -542,7 +546,7 @@ impl RouterActor {
             RouterIp::AquiringIp(ip_candidate, start_time) => {
                 if start_time.elapsed() > Duration::from_secs(5) {
                     if self
-                        .write_ip_assignment(ip_candidate.ip, ip_candidate.node_id)
+                        .write_ip_assignment(ip_candidate.ip, ip_candidate.endpoint_id)
                         .await
                         .is_ok()
                     {
