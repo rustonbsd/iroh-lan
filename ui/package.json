@@ -18,7 +18,7 @@
     "@radix-ui/react-tooltip": "^1.2.8",
     "@tailwindcss/vite": "^4.1.12",
     "@tanstack/react-query": "^5.86.0",
-    "@tauri-apps/api": "^2",
+    "@tauri-apps/api": "~2.8",
     "@tauri-apps/plugin-opener": "^2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -32,7 +32,7 @@
     "zod": "^4.1.5"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
+    "@tauri-apps/cli": "~2.8",
     "@types/node": "^24.3.1",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
