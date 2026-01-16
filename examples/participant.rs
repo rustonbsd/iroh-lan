@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         loop {
             println!(
-                "Network started with node ID {:?}",
+                "Network started with endpoint ID {:?}",
                 network.get_router_state().await
             );
             sleep(std::time::Duration::from_secs(5)).await;

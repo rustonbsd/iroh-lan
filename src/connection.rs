@@ -7,13 +7,10 @@ use std::{
 use crate::DirectMessage;
 use actor_helper::{Action, Actor, Handle, Receiver, act, act_ok};
 use anyhow::Result;
+use iroh::endpoint::{Connection, VarInt};
 use iroh::{
-    Endpoint,
+    Endpoint, EndpointId,
     endpoint::{RecvStream, SendStream},
-};
-use iroh::{
-    NodeId,
-    endpoint::{Connection, VarInt},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, warn};
@@ -47,7 +44,7 @@ struct ConnActor {
     // forever in the main standalone loop for router events hanging on
     // route_packet failed
     conn: Option<Connection>,
-    conn_node_id: NodeId,
+    conn_endpoint_id: EndpointId,
     send_stream: Option<SendStream>,
     recv_stream: Option<RecvStream>,
     endpoint: Endpoint,
@@ -79,7 +76,7 @@ impl Conn {
             api.clone(),
             external_sender,
             endpoint,
-            conn.remote_node_id()?,
+            conn.remote_id(),
             Some(conn),
             Some(send_stream),
             Some(recv_stream),
@@ -91,7 +88,7 @@ impl Conn {
 
     pub async fn connect(
         endpoint: Endpoint,
-        node_id: NodeId,
+        endpoint_id: EndpointId,
         external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
     ) -> Self {
         let (api, rx) = Handle::channel();
@@ -100,7 +97,7 @@ impl Conn {
             api.clone(),
             external_sender,
             endpoint.clone(),
-            node_id,
+            endpoint_id,
             None,
             None,
             None,
@@ -116,7 +113,7 @@ impl Conn {
         tokio::spawn({
             let s = s.clone();
             async move {
-                if let Ok(conn) = endpoint.connect(node_id, crate::Direct::ALPN).await {
+                if let Ok(conn) = endpoint.connect(endpoint_id, crate::Direct::ALPN).await {
                     let _ = s.incoming_connection(conn, false).await;
                 }
             }
@@ -177,7 +174,7 @@ impl Actor<anyhow::Error> for ConnActor {
                             warn!("Send stream stopped");
                             let _ = self.try_reconnect().await;
                         } else {
-                            warn!("Max reconnects reached, closing connection to {}", self.conn_node_id);
+                            warn!("Max reconnects reached, closing connection to {}", self.conn_endpoint_id);
                             break;
                         }
                     }
@@ -237,7 +234,7 @@ impl ConnActor {
         self_handle: Handle<ConnActor, anyhow::Error>,
         external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
         endpoint: Endpoint,
-        conn_node_id: NodeId,
+        conn_endpoint_id: EndpointId,
         conn: Option<iroh::endpoint::Connection>,
         send_stream: Option<SendStream>,
         recv_stream: Option<RecvStream>,
@@ -260,7 +257,7 @@ impl ConnActor {
             sender_notify: tokio::sync::Notify::new(),
             last_reconnect: tokio::time::Instant::now(),
             reconnect_backoff: Duration::from_millis(100),
-            conn_node_id,
+            conn_endpoint_id,
             self_handle,
             reconnect_count: AtomicUsize::new(0),
         }
@@ -331,7 +328,7 @@ impl ConnActor {
         tokio::spawn({
             let api = self.self_handle.clone();
             let endpoint = self.endpoint.clone();
-            let conn_node_id = self.conn_node_id;
+            let conn_node_id = self.conn_endpoint_id;
             async move {
                 if let Ok(conn) = endpoint.connect(conn_node_id, crate::Direct::ALPN).await {
                     let _ = api

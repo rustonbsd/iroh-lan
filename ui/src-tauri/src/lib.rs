@@ -67,7 +67,7 @@ async fn create_network(name: String, password: String) -> Result<MyInfo, String
         .await
         .map_err(|e| e.to_string())?;
     info!(
-        "Joined network with node ID {}",
+        "Joined network with endpoint id {}",
         network
             .get_router_handle()
             .await

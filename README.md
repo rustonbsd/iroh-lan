@@ -20,6 +20,8 @@ On Linux and macOS, make the binary executable: `chmod +x iroh-lan-ui-*`
 
 Requires admin/sudo rights to create the network interface. No accounts or dependencies required.
 
+> **Version Compatibility**: All peers in a network must use the **same version** of iroh-lan. Different versions might use incompatible network protocol versions and will not connect to each other (see iroh version). When setting up a LAN party, ensure everyone downloads the same release if you want guaranteed connectivity.
+
 # UI
 
 The iroh-lan UI is designed for zero-friction, ephemeral networking: no accounts, no central servers, no device lists. Name a network, choose a password, and you’re on a private L3 LAN with anyone who does the same, created out of thin air and gone when you leave.

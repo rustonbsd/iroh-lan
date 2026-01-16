@@ -228,11 +228,16 @@ export default function App() {
                   <Input id="password" type="password" placeholder="••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
                 </div>
               </CardContent>
-              <CardFooter className="justify-between">
-                <p className="text-xs text-muted-foreground max-w-[60%] leading-relaxed">Node IDs rotate on restart. Share the network name (and password if set) with peers.</p>
-                <Button disabled={!networkName || loading} onClick={connect}>
-                  {loading ? "Joining…" : "Join"}
-                </Button>
+              <CardFooter className="flex-col items-start gap-3">
+                <div className="flex w-full items-center justify-between">
+                  <p className="text-xs text-muted-foreground max-w-[60%] leading-relaxed">Endpoint IDs rotate on restart. Share the network name (and password if set) with peers.</p>
+                  <Button disabled={!networkName || loading} onClick={connect}>
+                    {loading ? "Joining…" : "Join"}
+                  </Button>
+                </div>
+                <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+                  <span className="font-medium">Note:</span> All peers must use the same version of iroh-lan to guarantee compatibility.
+                </p>
               </CardFooter>
             </Card>
           </div>
@@ -281,7 +286,7 @@ export default function App() {
                     <TableHeader>
                       <TableRow>
                         <TableHead className="w-[180px]">IP</TableHead>
-                        <TableHead className="w-[calc(100%-360px)]">Node ID</TableHead>
+                        <TableHead className="w-[calc(100%-360px)]">Endpoint ID</TableHead>
                         <TableHead className="w-[180px] text-right">Actions / Status</TableHead>
                       </TableRow>
                     </TableHeader>
