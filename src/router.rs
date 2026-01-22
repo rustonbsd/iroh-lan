@@ -435,11 +435,10 @@ impl RouterActor {
         );
         let mut candidates = Vec::new();
         for entry in entries.into_iter().flatten() {
-            if let Ok(b) = self.blobs.get_bytes(entry.content_hash()).await {
-                if let Ok(candidate) = postcard::from_bytes::<IpCandidate>(&b) {
+            if let Ok(b) = self.blobs.get_bytes(entry.content_hash()).await
+                && let Ok(candidate) = postcard::from_bytes::<IpCandidate>(&b) {
                     candidates.push(candidate);
                 }
-            }
         }
 
         Ok(candidates)

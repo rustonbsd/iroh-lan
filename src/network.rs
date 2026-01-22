@@ -161,11 +161,10 @@ impl Actor<anyhow::Error> for NetworkActor {
 
                 // init tun after ip is assigned
                 _ = ip_tick.tick(), if self.tun.is_none() && matches!(self.router.get_ip_state().await, Ok(RouterIp::AssignedIp(_))) => {
-                    if let Ok(RouterIp::AssignedIp(ip)) = self.router.get_ip_state().await {
-                        if let Ok(tun) = Tun::new((ip.octets()[2],ip.octets()[3]), self._local_to_direct_tx.clone()).await {
+                    if let Ok(RouterIp::AssignedIp(ip)) = self.router.get_ip_state().await
+                        && let Ok(tun) = Tun::new((ip.octets()[2],ip.octets()[3]), self._local_to_direct_tx.clone()).await {
                             self.tun = Some(tun);
                         }
-                    }
                 }
 
                 Ok(tun_recv) = self.local_to_direct_rx.recv(), if self.tun.is_some() => {
@@ -180,11 +179,10 @@ impl Actor<anyhow::Error> for NetworkActor {
 
                 Ok(direct_msg) = self.direct_to_local_rx.recv(), if self.tun.is_some() => {
                     // Route remote packet to tun if our ip
-                    if let Some(tun) = &self.tun {
-                        if let DirectMessage::IpPacket(ip_pkg) = direct_msg {
+                    if let Some(tun) = &self.tun
+                        && let DirectMessage::IpPacket(ip_pkg) = direct_msg {
                             let _ = tun.write(ip_pkg).await;
                         }
-                    }
                 }
             }
         }
