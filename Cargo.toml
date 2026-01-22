@@ -35,12 +35,20 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 actor-helper = "0.2"
+clap = { version = "4.5.54", features = ["derive"] }
+ratatui = "0.30.0"
+crossterm = "0.29.0"
+
 
 
 [lib]
 path = "src/lib.rs"
 crate-type = ["lib"]
 bench = false
+
+[[bin]]
+name = "iroh-lan"
+path = "src/cli.rs"
 
 [[example]]
 name = "participant"
