@@ -15,8 +15,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  network-stress-test:
+    name: Network Stress Test (Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Stress Test
+        # Run test for 2 minutes to ensure stability
+        run: |
+          export GAME_TEST_DURATION=2
+          make stress-test
+
   build-tauri:
     name: Build Tauri ${{ matrix.platform.name }}
+    needs: network-stress-test
     runs-on: ${{ matrix.platform.runs-on }}
     strategy:
       fail-fast: false

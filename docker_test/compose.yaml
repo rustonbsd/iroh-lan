@@ -1,0 +1,33 @@
+services:
+  server:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    image: iroh-lan-test
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ../target/debug:/app/bin
+    command: ["server"]
+    healthcheck:
+      test: ["CMD", "grep", "-q", "My IP is", "/app/iroh.log"]
+      interval: 2s
+      timeout: 30s
+      retries: 60
+    environment:
+      - RUST_LOG=info
+
+  
+  client:
+    image: iroh-lan-test
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ../target/debug:/app/bin
+    command: ["client"]
+    environment:
+      - RUST_LOG=info
