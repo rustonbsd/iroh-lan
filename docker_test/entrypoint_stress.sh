@@ -9,7 +9,7 @@ echo "Service: $SERVICE_NAME starting [STRESS MODE]..."
 echo "Starting iroh-lan..."
 export RUST_LOG=debug
 > /app/iroh.log
-/app/bin/iroh-lan --name testnet -d > /app/iroh.log 2>&1 &
+/app/bin/iroh-lan --name testnet123 -d > /app/iroh.log 2>&1 &
 IROH_PID=$!
 
 echo "Waiting for IP assignment..."
@@ -104,7 +104,7 @@ elif [ "$ROLE" == "client" ]; then
     sleep 2 # Let it die
 
     echo "Restarting iroh-lan..."
-    /app/bin/iroh-lan --name testnet -d > /app/iroh_2.log 2>&1 &
+    /app/bin/iroh-lan --name testnet123 -d > /app/iroh_2.log 2>&1 &
     IROH_PID_2=$!
     
     echo "Waiting for new IP assignment..."
