@@ -44,9 +44,13 @@ async fn main() -> Result<()> {
     }
 
     if args.no_display {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_thread_ids(true)
+        use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+        tracing_subscriber::registry()
+            .with(fmt::layer().with_thread_ids(true))
+            .with(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new("iroh_lan=trace,info")),
+            )
             .init();
 
         run_headless(args.name, args.password).await?;
