@@ -1,9 +1,6 @@
 use std::{collections::BTreeMap, net::Ipv4Addr, time::Duration};
 
-use distributed_topic_tracker::{
-    AutoDiscoveryGossip, GossipReceiver, GossipSender, RecordPublisher, Topic, TopicId,
-};
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::SigningKey;
 use futures::StreamExt;
 use iroh_blobs::store::mem::MemStore;
 use iroh_docs::{
@@ -15,10 +12,14 @@ use iroh_docs::{
 
 use anyhow::{Context, Result, bail};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
-use iroh_gossip::net::Gossip;
+use iroh_gossip::{
+    api::{GossipReceiver, GossipSender},
+    net::Gossip,
+};
+use iroh_topic_tracker::{TopicDiscoveryConfig, TopicDiscoveryExt, TopicDiscoveryHandle};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use tracing::{debug, info};
+use tracing::{debug, info, trace, warn};
 
 use actor_helper::{Action, Actor, Handle, act, act_ok};
 
@@ -108,29 +109,30 @@ impl Builder {
         let topic_hash: [u8; 32] = topic_hasher.finalize()[..32].try_into()?;
 
         let signing_key = SigningKey::from_bytes(&self.secret_key.to_bytes());
-        let record_publisher = RecordPublisher::new(
-            TopicId::new(z32::encode(&topic_hash)),
-            VerifyingKey::from_bytes(endpoint.id().as_bytes())?,
-            signing_key,
-            None,
-            secret_initials,
-        );
-        let topic = if self.creator_mode {
+        let topic_discovery_config = TopicDiscoveryConfig::new(signing_key);
+        let (gossip_sender, gossip_receiver, topic_handle) = if self.creator_mode {
             gossip
-                .subscribe_and_join_with_auto_discovery_no_wait(record_publisher)
+                .subscribe_with_discovery(
+                    topic_hash.to_vec(),
+                    vec![],
+                    endpoint.clone(),
+                    topic_discovery_config,
+                )
                 .await?
         } else {
             gossip
-                .subscribe_and_join_with_auto_discovery(record_publisher)
+                .subscribe_with_discovery_joined(
+                    topic_hash.to_vec(),
+                    vec![],
+                    endpoint.clone(),
+                    topic_discovery_config,
+                )
                 .await?
         };
-        let (gossip_sender, gossip_receiver) = topic.split().await?;
 
         let doc_peers = gossip_receiver
             .neighbors()
-            .await
-            .iter()
-            .map(|pub_key| EndpointAddr::new(*pub_key))
+            .map(EndpointAddr::new)
             .collect::<Vec<_>>();
 
         debug!("[Doc peers]: {:?}", doc_peers);
@@ -161,7 +163,7 @@ impl Builder {
                 _docs: docs,
                 doc,
                 endpoint_id: endpoint.id(),
-                _topic: Some(topic),
+                _topic: Some(topic_handle),
                 rx,
                 blobs,
                 my_ip: RouterIp::NoIp,
@@ -213,7 +215,7 @@ struct RouterActor {
     pub(crate) author_id: AuthorId,
 
     pub endpoint_id: EndpointId,
-    pub(crate) _topic: Option<Topic>,
+    pub(crate) _topic: Option<TopicDiscoveryHandle>,
 
     pub my_ip: RouterIp,
 }
@@ -285,19 +287,32 @@ impl Actor<anyhow::Error> for RouterActor {
         let mut ip_tick = tokio::time::interval(Duration::from_millis(500));
         ip_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        debug!("RouterActor started. EndpointId: {}", self.endpoint_id);
+
         loop {
             tokio::select! {
                 Ok(action) = self.rx.recv_async() => {
+                    trace!("Action received");
                     action(self).await;
                 }
                 _ = tokio::signal::ctrl_c() => {
+                    info!("Received Ctrl-C, stopping RouterActor");
                     break
                 }
 
                 // advance ip state machine
                 _ = ip_tick.tick(), if !matches!(self.my_ip, RouterIp::AssignedIp(_)) => {
-                    if let Ok(true) = self.advance_ip_state().await {
-                        info!("Acquired IP: {:?}", self.my_ip);
+                    trace!("IP tick");
+                    match self.advance_ip_state().await {
+                        Ok(true) => {
+                             info!("Acquired IP: {:?}", self.my_ip);
+                        }
+                        Ok(false) => {
+                            // Still acquiring or NoIp, trace logged in advance_ip_state
+                        }
+                        Err(e) => {
+                            warn!("Error advancing IP state: {:?}", e);
+                        }
                     }
                 }
             }
@@ -361,6 +376,7 @@ fn key_prefix_ip_candidates(ip: Ipv4Addr) -> String {
 
 impl RouterActor {
     async fn read_all_ip_assignments(&mut self) -> Result<Vec<IpAssignment>> {
+        trace!("Reading all IP assignments");
         let entries = self
             .doc
             .get_many(query_prefix(key_ip_assigned_prefix()))
@@ -379,11 +395,12 @@ impl RouterActor {
                 assignments.push(assignment);
             }
         }
-
+        trace!("Found {} IP assignments", assignments.len());
         Ok(assignments)
     }
 
     async fn read_all_ip_candidates(&mut self) -> Result<Vec<IpCandidate>> {
+        trace!("Reading all IP candidates");
         let entries = self
             .doc
             .get_many(query_prefix(key_ip_candidate_prefix()))
@@ -401,7 +418,7 @@ impl RouterActor {
                 candidates.push(candidate);
             }
         }
-
+        trace!("Found {} IP candidates", candidates.len());
         Ok(candidates)
     }
 
@@ -436,9 +453,10 @@ impl RouterActor {
         let mut candidates = Vec::new();
         for entry in entries.into_iter().flatten() {
             if let Ok(b) = self.blobs.get_bytes(entry.content_hash()).await
-                && let Ok(candidate) = postcard::from_bytes::<IpCandidate>(&b) {
-                    candidates.push(candidate);
-                }
+                && let Ok(candidate) = postcard::from_bytes::<IpCandidate>(&b)
+            {
+                candidates.push(candidate);
+            }
         }
 
         Ok(candidates)
@@ -446,6 +464,7 @@ impl RouterActor {
 
     // write ip assigned
     async fn write_ip_assignment(&mut self, ip: Ipv4Addr, endpoint_id: EndpointId) -> Result<()> {
+        info!("Attempting to assign IP {} to {}", ip, endpoint_id);
         if self.read_ip_assignment(ip).await.is_ok() {
             anyhow::bail!("ip already assigned");
         }
@@ -470,6 +489,7 @@ impl RouterActor {
         // We are the chosen one!
         // 1. write our ip assignment
         // 2. delete all candidates for this ip
+        debug!("Winning candidate for IP {}. Writing assignment.", ip);
         let data = postcard::to_stdvec(&IpAssignment { ip, endpoint_id })?;
         self.doc
             .set_bytes(self.author_id, key_ip_assigned(ip), data)
@@ -489,6 +509,7 @@ impl RouterActor {
         ip: Ipv4Addr,
         endpoint_id: EndpointId,
     ) -> Result<IpCandidate> {
+        debug!("Writing IP candidate {} for {}", ip, endpoint_id);
         // already assigned? don't write
         if self.read_ip_assignment(ip).await.is_ok() {
             anyhow::bail!("ip already assigned");
@@ -499,6 +520,7 @@ impl RouterActor {
 
         // if someone else is already a candidate, treat as contested and skip writing
         if candidates.iter().any(|c| c.endpoint_id != endpoint_id) {
+            warn!("Contested IP candidate {}. Another candidate exists.", ip);
             anyhow::bail!("ip candidate already exists");
         }
 
@@ -532,9 +554,11 @@ impl RouterActor {
 
 impl RouterActor {
     async fn advance_ip_state(&mut self) -> Result<bool> {
+        trace!("Advancing IP state. Current: {:?}", self.my_ip);
         match self.my_ip.clone() {
             RouterIp::NoIp => {
                 let next_ip = self.get_next_ip().await?;
+                info!("Trying to acquire IP candidate: {}", next_ip);
 
                 self.my_ip = RouterIp::AquiringIp(
                     self.write_ip_candidate(next_ip, self.endpoint_id).await?,
@@ -543,14 +567,25 @@ impl RouterActor {
                 Ok(false)
             }
             RouterIp::AquiringIp(ip_candidate, start_time) => {
-                if start_time.elapsed() > Duration::from_secs(5) {
+                let elapsed = start_time.elapsed();
+                debug!("Acquiring IP {:?}. Elapsed: {:?}", ip_candidate.ip, elapsed);
+                if elapsed > Duration::from_secs(5) {
+                    info!(
+                        "Attempting to finalize IP assignment for {}",
+                        ip_candidate.ip
+                    );
                     if self
                         .write_ip_assignment(ip_candidate.ip, ip_candidate.endpoint_id)
                         .await
                         .is_ok()
                     {
+                        info!("Successfully assigned IP: {}", ip_candidate.ip);
                         self.my_ip = RouterIp::AssignedIp(ip_candidate.ip);
                     } else {
+                        warn!(
+                            "Failed to assign IP {}. Restarting negotiation.",
+                            ip_candidate.ip
+                        );
                         self.my_ip = RouterIp::NoIp;
                     }
                 }

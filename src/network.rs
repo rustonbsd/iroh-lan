@@ -6,7 +6,8 @@ use iroh::{Endpoint, EndpointId, SecretKey};
 use iroh_blobs::store::mem::MemStore;
 use iroh_docs::protocol::Docs;
 use iroh_gossip::{net::Gossip, proto::HyparviewConfig};
-use tracing::warn;
+use sha2::Digest;
+use tracing::{debug, info, trace, warn, error};
 
 use crate::{Direct, DirectMessage, Router, Tun, local_networking::Ipv4Pkg, router::RouterIp};
 
@@ -57,8 +58,13 @@ impl Network {
             .spawn(endpoint.clone(), (*blobs).clone(), gossip.clone())
             .await?;
 
+        let mut network_secret = sha2::Sha512::new();
+        network_secret.update(format!("iroh-lan-network-name-{}", name));
+        network_secret.update(format!("iroh-lan-network-secret-{password}"));
+        let network_secret: [u8; 64] = network_secret.finalize().into();
+
         let (direct_connect_tx, direct_connect_rx) = tokio::sync::broadcast::channel(1024 * 16);
-        let direct = Direct::new(endpoint.clone(), direct_connect_tx.clone());
+        let direct = Direct::new(endpoint.clone(), direct_connect_tx.clone(), &network_secret);
 
         let _router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(iroh_gossip::ALPN, gossip.clone())
@@ -150,39 +156,72 @@ impl Actor<anyhow::Error> for NetworkActor {
         let mut ip_tick = tokio::time::interval(Duration::from_millis(500));
         ip_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        debug!("NetworkActor started");
+
         loop {
             tokio::select! {
                 Ok(action) = self.rx.recv_async() => {
+                   trace!("NetworkActor action received");
                     action(self).await;
                 }
                 _ = tokio::signal::ctrl_c() => {
+                    info!("Received Ctrl-C, shutting down NetworkActor");
                     break
                 }
 
                 // init tun after ip is assigned
                 _ = ip_tick.tick(), if self.tun.is_none() && matches!(self.router.get_ip_state().await, Ok(RouterIp::AssignedIp(_))) => {
-                    if let Ok(RouterIp::AssignedIp(ip)) = self.router.get_ip_state().await
-                        && let Ok(tun) = Tun::new((ip.octets()[2],ip.octets()[3]), self._local_to_direct_tx.clone()).await {
-                            self.tun = Some(tun);
-                        }
+                    if let Ok(RouterIp::AssignedIp(ip)) = self.router.get_ip_state().await {
+                         info!("Initializing TUN for IP: {}", ip);
+                         match Tun::new((ip.octets()[2],ip.octets()[3]), self._local_to_direct_tx.clone()).await {
+                            Ok(tun) => {
+                                info!("TUN initialized successfully");
+                                self.tun = Some(tun);
+                            }
+                            Err(e) => {
+                                error!("Failed to initialize TUN: {:?}", e);
+                            }
+                         }
+                    }
                 }
 
                 Ok(tun_recv) = self.local_to_direct_rx.recv(), if self.tun.is_some() => {
                     // Tun initialized, route packets
                     if let Ok(ip_pkg) = tun_recv.to_ipv4_packet() {
                         let dest = ip_pkg.get_destination();
-                        if let Ok(to) = self.router.get_endpoint_id_from_ip(dest).await {
-                            let _ = self.direct.route_packet(to, DirectMessage::IpPacket(tun_recv)).await;
+                        match self.router.get_endpoint_id_from_ip(dest).await {
+                             Ok(to) => {
+                                trace!("Routing packet from TUN to {}", to);
+                                if let Err(e) = self.direct.route_packet(to, DirectMessage::IpPacket(tun_recv)).await {
+                                    warn!("Failed to route packet to {}: {:?}", to, e);
+                                }
+                             }
+                             Err(e) => {
+                                trace!("Could not resolve endpoint for IP {}: {:?}", dest, e);
+                             }
                         }
                     }
                 }
 
-                Ok(direct_msg) = self.direct_to_local_rx.recv(), if self.tun.is_some() => {
-                    // Route remote packet to tun if our ip
-                    if let Some(tun) = &self.tun
-                        && let DirectMessage::IpPacket(ip_pkg) = direct_msg {
-                            let _ = tun.write(ip_pkg).await;
+                res = self.direct_to_local_rx.recv(), if self.tun.is_some() => {
+                    match res {
+                        Ok(direct_msg) => {
+                            // Route remote packet to tun if our ip
+                            if let Some(tun) = &self.tun
+                                && let DirectMessage::IpPacket(ip_pkg) = direct_msg {
+                                    trace!("Routing remote packet to TUN");
+                                    if let Err(e) = tun.write(ip_pkg).await {
+                                        warn!("Failed to write to TUN: {:?}", e);
+                                    }
+                                }
                         }
+                        Err(e) => {
+                            warn!("NetworkActor broadcast receiver error: {:?}", e);
+                            if let tokio::sync::broadcast::error::RecvError::Closed = e {
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }

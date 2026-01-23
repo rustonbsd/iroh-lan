@@ -28,9 +28,17 @@ jobs:
           export GAME_TEST_DURATION=2
           make stress-test
 
+  approve-build:
+    name: Approve Build
+    needs: network-stress-test
+    runs-on: ubuntu-latest
+    environment: ui-build
+    steps:
+      - run: echo "Manual approval received."
+
   build-tauri:
     name: Build Tauri ${{ matrix.platform.name }}
-    needs: network-stress-test
+    needs: approve-build
     runs-on: ${{ matrix.platform.runs-on }}
     strategy:
       fail-fast: false

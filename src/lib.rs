@@ -5,6 +5,7 @@ mod direct_connect;
 mod local_networking;
 pub mod network;
 mod router;
+pub mod auth;
 
 pub use connection::ConnState;
 pub use direct_connect::{Direct, DirectMessage};

@@ -1,11 +1,15 @@
 use actor_helper::{Action, Handle, act};
 use anyhow::Result;
-use iroh::{EndpointId, endpoint::Connection, protocol::ProtocolHandler};
+use iroh::{
+    EndpointId,
+    endpoint::Connection,
+    protocol::ProtocolHandler,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, hash_map::Entry};
-use tracing::{debug, info};
+use tracing::{debug, info, trace, warn, error};
 
-use crate::{connection::Conn, local_networking::Ipv4Pkg};
+use crate::{auth, connection::Conn, local_networking::Ipv4Pkg};
 
 #[derive(Debug, Clone)]
 pub struct Direct {
@@ -14,6 +18,7 @@ pub struct Direct {
 
 #[derive(Debug)]
 struct DirectActor {
+    network_secret: [u8; 64],
     peers: HashMap<EndpointId, Conn>,
     endpoint: iroh::endpoint::Endpoint,
     rx: actor_helper::Receiver<Action<DirectActor>>,
@@ -31,6 +36,7 @@ impl Direct {
     pub fn new(
         endpoint: iroh::endpoint::Endpoint,
         direct_connect_tx: tokio::sync::broadcast::Sender<DirectMessage>,
+        network_secret: &[u8; 64],
     ) -> Self {
         let (api, rx) = Handle::channel();
         let mut actor = DirectActor {
@@ -38,6 +44,7 @@ impl Direct {
             endpoint,
             rx,
             direct_connect_tx,
+            network_secret: *network_secret,
         };
         tokio::spawn(async move { actor.run().await });
         Self { api }
@@ -77,17 +84,20 @@ impl Direct {
 }
 
 impl DirectActor {
-    async fn run(&mut self) {
+    async fn run(&mut self) -> Result<()> {
+        debug!("DirectActor run loop started");
         loop {
             tokio::select! {
                 Ok(action) = self.rx.recv_async() => {
                     action(self).await;
                 }
                 _ = tokio::signal::ctrl_c() => {
+                     info!("Ctrl-C received, shutting down DirectActor");
                     break
                 }
             }
         }
+        Ok(())
     }
 
     async fn handle_connection(&mut self, conn: iroh::endpoint::Connection) -> Result<()> {
@@ -96,10 +106,20 @@ impl DirectActor {
 
         match self.peers.entry(remote_id) {
             Entry::Occupied(mut entry) => {
-                entry.get_mut().incoming_connection(conn, true).await?;
+                debug!("Existing connection found for {}, upgrading/resetting", remote_id);
+                let (send_stream, recv_stream) =
+                    auth::accept(&conn, &self.network_secret, self.endpoint.id(), remote_id)
+                        .await?;
+                entry
+                    .get_mut()
+                    .incoming_connection(conn, send_stream, recv_stream)
+                    .await?;
             }
             Entry::Vacant(entry) => {
-                let (send_stream, recv_stream) = conn.accept_bi().await?;
+                debug!("New connection entry for {}", remote_id);
+                let (send_stream, recv_stream) =
+                    auth::accept(&conn, &self.network_secret, self.endpoint.id(), remote_id)
+                        .await?;
                 entry.insert(
                     Conn::new(
                         self.endpoint.clone(),
@@ -107,6 +127,7 @@ impl DirectActor {
                         send_stream,
                         recv_stream,
                         self.direct_connect_tx.clone(),
+                        &self.network_secret,
                     )
                     .await?,
                 );
@@ -117,21 +138,34 @@ impl DirectActor {
     }
 
     async fn route_packet(&mut self, to: EndpointId, pkg: DirectMessage) -> Result<()> {
+        trace!("Routing packet to {}", to);
         match self.peers.entry(to) {
             Entry::Occupied(entry) => {
                 if entry.get().get_state().await == crate::connection::ConnState::Closed {
-                    debug!("Connection to peer {} closed, removing", to);
+                    warn!("Connection to peer {} is closed, removing from peers", to);
                     entry.remove();
                     return Err(anyhow::anyhow!("connection to peer is not running"));
                 }
-
-                entry.get().write(pkg).await?;
+                
+                if let Err(e) = entry.get().write(pkg).await {
+                     error!("Failed to write packet to peer {}: {:?}", to, e);
+                     return Err(e);
+                }
             }
             Entry::Vacant(entry) => {
-                let conn =
-                    Conn::connect(self.endpoint.clone(), to, self.direct_connect_tx.clone()).await;
+                info!("No active connection to {}, initiating new connection", to);
+                let conn = Conn::connect(
+                    self.endpoint.clone(),
+                    to,
+                    self.direct_connect_tx.clone(),
+                    &self.network_secret,
+                )
+                .await;
 
-                conn.write(pkg).await?;
+                if let Err(e) = conn.write(pkg).await {
+                    error!("Failed to write packet to new connection {}: {:?}", to, e);
+                    return Err(e);
+                }
                 entry.insert(conn);
             }
         }
