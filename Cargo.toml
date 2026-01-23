@@ -13,7 +13,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
-distributed-topic-tracker = "0.2.5"
+iroh-topic-tracker = { git = "https://github.com/rustonbsd/iroh-topic-tracker", branch="rewrite" }
 ed25519-dalek = "3.0.0-pre.1"
 iroh = "0.95.1"
 iroh-gossip = "0.95.0"
@@ -55,7 +55,3 @@ name = "participant"
 path = "examples/participant.rs"
 crate-type = ["bin"]
 
-[[example]]
-name = "creator"
-path = "examples/creator.rs"
-crate-type = ["bin"]
