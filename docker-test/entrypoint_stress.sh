@@ -7,10 +7,17 @@ SERVICE_NAME=$1
 echo "Service: $SERVICE_NAME starting [STRESS MODE]..."
 
 echo "Starting iroh-lan..."
-export RUST_LOG=debug
+export RUST_LOG=iroh_lan=trace,info
 > /app/iroh.log
 /app/bin/iroh-lan --name testnet -d > /app/iroh.log 2>&1 &
 IROH_PID=$!
+
+# Function to get current IP dynamically
+get_current_ip() {
+    # Searches for lines like "My IP is X" or "Successfully assigned IP: X"
+    # Returns the last one found
+    grep -E "My IP is|Successfully assigned IP:" /app/iroh.log | tail -n1 | awk '{print $NF}'
+}
 
 echo "Waiting for IP assignment..."
 TIMEOUT=120
@@ -18,8 +25,8 @@ start_time=$(date +%s)
   
 GOT_IP=""
 while [ $(( $(date +%s) - start_time )) -lt $TIMEOUT ]; do
-      if grep -q "My IP is" /app/iroh.log; then
-          GOT_IP=$(grep "My IP is" /app/iroh.log | tail -n1 | awk '{print $NF}')
+      GOT_IP=$(get_current_ip)
+      if [ -n "$GOT_IP" ]; then
           break
       fi
       sleep 1
@@ -33,14 +40,14 @@ fi
 
 echo "Assigned IP: $GOT_IP"
 
-if [ "$GOT_IP" == "172.22.0.2" ]; then
+if [ "$GOT_IP" == "172.22.0.3" ]; then
     ROLE="server"
-    PEER_IP="172.22.0.3"
-    echo "I am the SERVER (since I got .2)"
-elif [ "$GOT_IP" == "172.22.0.3" ]; then
+    PEER_IP="172.22.0.4"
+    echo "I am the SERVER (since I got .3)"
+elif [ "$GOT_IP" == "172.22.0.4" ]; then
     ROLE="client"
-    PEER_IP="172.22.0.2"
-    echo "I am the CLIENT (since I got .3)"
+    PEER_IP="172.22.0.3"
+    echo "I am the CLIENT (since I got .4)"
 else
     echo "Error: Unexpected IP $GOT_IP"
     exit 1
@@ -71,6 +78,12 @@ if [ "$ROLE" == "server" ]; then
 elif [ "$ROLE" == "client" ]; then
     echo "Waiting for server to be ready..."
     sleep 5
+    
+    # DEBUG: Check for lost IPs
+    echo "DEBUG: Checking for lost IP assignments in logs..."
+    grep "Lost IP assignment" /app/iroh.log || true
+    echo "DEBUG: Checking for assigned IPs in logs..."
+    grep "Successfully assigned IP" /app/iroh.log || true
 
     # A. Broadcast Hostility Test (simulates 'bad' peer/loop)
     echo "TEST 1/4: Starting Broadcast Ping (Background Hostility)..."
@@ -78,6 +91,14 @@ elif [ "$ROLE" == "client" ]; then
     PING_PID=$!
 
     # B. Throughput Test (Clean Network)
+    # Refresh Peer IP in case of conflicts
+    PEER_IP_CURRENT=$(get_current_ip)
+    # Assuming standard topology: .3 <-> .4
+    # If I am .3, peer is .4. If I changed to .5, peer might be .3 or .4?
+    # For robustness, we stick to the initial PEER_IP unless we implement discovery.
+    # But we should log our own IP status.
+    echo "My Current IP: $PEER_IP_CURRENT"
+
     echo "TEST 2/4: Baseline Throughput (10s)..."
     iperf3 -c $PEER_IP -t 10
     

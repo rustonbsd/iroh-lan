@@ -129,7 +129,7 @@ impl TunActor {
                         let destination = ipv4_packet.get_destination();
 
                         // drop broadcast packets to prevent loops (broadcast storms)
-                        if destination == Ipv4Addr::new(255, 255, 255, 255) {
+                        if destination.octets()[3] == 255 {
                             trace!(
                                 "Dropping broadcast packet to prevent loop: src={} dst={}",
                                 source,

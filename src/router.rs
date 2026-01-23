@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, net::Ipv4Addr, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    net::Ipv4Addr,
+    time::Duration,
+};
 
 use ed25519_dalek::SigningKey;
 use futures::StreamExt;
@@ -17,6 +21,7 @@ use iroh_gossip::{
     net::Gossip,
 };
 use iroh_topic_tracker::{TopicDiscoveryConfig, TopicDiscoveryExt, TopicDiscoveryHandle};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use tracing::{debug, info, trace, warn};
@@ -199,6 +204,7 @@ pub struct Router {
 pub enum RouterIp {
     NoIp,
     AquiringIp(IpCandidate, tokio::time::Instant),
+    VerifyingIp(Ipv4Addr, tokio::time::Instant),
     AssignedIp(Ipv4Addr),
 }
 
@@ -287,8 +293,13 @@ impl Actor<anyhow::Error> for RouterActor {
         let mut ip_tick = tokio::time::interval(Duration::from_millis(500));
         ip_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        let cleanup_interval_secs = 60 + rand::rng().random_range(0..30);
+        let mut cleanup_tick = tokio::time::interval(Duration::from_secs(cleanup_interval_secs));
+        cleanup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         debug!("RouterActor started. EndpointId: {}", self.endpoint_id);
 
+        let mut last_ip_state = self.my_ip.clone();
         loop {
             tokio::select! {
                 Ok(action) = self.rx.recv_async() => {
@@ -301,19 +312,24 @@ impl Actor<anyhow::Error> for RouterActor {
                 }
 
                 // advance ip state machine
-                _ = ip_tick.tick(), if !matches!(self.my_ip, RouterIp::AssignedIp(_)) => {
+                _ = ip_tick.tick() => {
                     trace!("IP tick");
                     match self.advance_ip_state().await {
-                        Ok(true) => {
-                             info!("Acquired IP: {:?}", self.my_ip);
-                        }
-                        Ok(false) => {
-                            // Still acquiring or NoIp, trace logged in advance_ip_state
-                        }
+                        Ok(_) => if self.my_ip != last_ip_state {
+                            info!("Router IP state changed: {:?} -> {:?}", last_ip_state, self.my_ip);
+                            last_ip_state = self.my_ip.clone();
+                        },
                         Err(e) => {
                             warn!("Error advancing IP state: {:?}", e);
                         }
                     }
+                }
+
+                _ = cleanup_tick.tick() => {
+                    trace!("Cleanup tick");
+                     if let Err(e) = self.perform_cleanup().await {
+                         warn!("Error performing cleanup: {:?}", e);
+                     }
                 }
             }
         }
@@ -322,16 +338,25 @@ impl Actor<anyhow::Error> for RouterActor {
     }
 }
 
+fn current_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpAssignment {
     pub ip: Ipv4Addr,
     pub endpoint_id: EndpointId,
+    pub last_updated: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IpCandidate {
     pub ip: Ipv4Addr,
     pub endpoint_id: EndpointId,
+    pub last_updated: u64,
 }
 
 async fn entry_to_value<S: for<'a> Deserialize<'a>>(
@@ -422,17 +447,23 @@ impl RouterActor {
         Ok(candidates)
     }
 
+    async fn clear_ip_candidate(&mut self, ip: Ipv4Addr, endpoint_id: EndpointId) -> Result<()> {
+        debug!("Clearing IP candidate {} for {}", ip, endpoint_id);
+        self.doc
+            .del(self.author_id, key_ip_candidate(ip, endpoint_id))
+            .await?;
+        Ok(())
+    }
+
     // Assigned IPs
     async fn read_ip_assignment(&mut self, ip: Ipv4Addr) -> Result<IpAssignment> {
-        postcard::from_bytes::<IpAssignment>(
-            &self
-                .doc
-                .get_one(query(key_ip_assigned(ip)))
-                .await?
-                .context("no assignment found")?
-                .to_vec(),
-        )
-        .context("failed to deserialize endpoint_id")
+        let entry = self
+            .doc
+            .get_one(query(key_ip_assigned(ip)))
+            .await?
+            .context("no assignment found")?;
+
+        entry_to_value(self.blobs.clone(), &entry).await
     }
 
     // Candidate IPs
@@ -465,40 +496,43 @@ impl RouterActor {
     // write ip assigned
     async fn write_ip_assignment(&mut self, ip: Ipv4Addr, endpoint_id: EndpointId) -> Result<()> {
         info!("Attempting to assign IP {} to {}", ip, endpoint_id);
-        if self.read_ip_assignment(ip).await.is_ok() {
-            anyhow::bail!("ip already assigned");
-        }
 
-        // check for multiple candidates
-        let mut candidates = self.read_ip_candidates(ip).await?;
-        if candidates.is_empty() {
-            bail!("no candidates for this ip");
-        }
+        let existing_assignment = self.read_ip_assignment(ip).await.ok();
 
-        candidates.sort_by_key(|c| {
-            let mut hasher = sha2::Sha256::new();
-            hasher.update(c.endpoint_id.as_bytes());
-            hasher.update(ip.to_string().as_bytes());
-            hasher.finalize()
-        });
+        if let Some(existing) = &existing_assignment {
+            if existing.endpoint_id != endpoint_id {
+                anyhow::bail!("ip already assigned to another node");
+            }
+        } else {
+            // New assignment. check for multiple candidates
+            let candidates = self.read_ip_candidates(ip).await?;
+            if candidates.is_empty() {
+                bail!("no candidates for this ip");
+            }
 
-        if candidates[0].endpoint_id != endpoint_id {
-            bail!("not the chosen candidate");
+            if candidates
+                .iter()
+                .any(|c| c.endpoint_id != self.endpoint_id && self.endpoint_id < c.endpoint_id)
+            {
+                self.clear_ip_candidate(ip, endpoint_id).await?;
+                bail!("another candidate with higher endpoint_id exists");
+            }
         }
 
         // We are the chosen one!
         // 1. write our ip assignment
         // 2. delete all candidates for this ip
         debug!("Winning candidate for IP {}. Writing assignment.", ip);
-        let data = postcard::to_stdvec(&IpAssignment { ip, endpoint_id })?;
+        let data = postcard::to_stdvec(&IpAssignment {
+            ip,
+            endpoint_id,
+            last_updated: current_time(),
+        })?;
         self.doc
             .set_bytes(self.author_id, key_ip_assigned(ip), data)
             .await?;
 
-        let _ = self
-            .doc
-            .del(self.author_id, key_prefix_ip_candidates(ip))
-            .await;
+        self.clear_ip_candidate(ip, endpoint_id).await.ok();
 
         Ok(())
     }
@@ -525,7 +559,11 @@ impl RouterActor {
         }
 
         // idempotent for our own node_id
-        let candidate = IpCandidate { ip, endpoint_id };
+        let candidate = IpCandidate {
+            ip,
+            endpoint_id,
+            last_updated: current_time(),
+        };
         let data = postcard::to_stdvec(&candidate)?;
         self.doc
             .set_bytes(self.author_id, key_ip_candidate(ip, endpoint_id), data)
@@ -568,30 +606,107 @@ impl RouterActor {
             }
             RouterIp::AquiringIp(ip_candidate, start_time) => {
                 let elapsed = start_time.elapsed();
-                debug!("Acquiring IP {:?}. Elapsed: {:?}", ip_candidate.ip, elapsed);
-                if elapsed > Duration::from_secs(5) {
-                    info!(
-                        "Attempting to finalize IP assignment for {}",
+
+                if let Ok(candidates) = self.read_ip_candidates(ip_candidate.ip).await
+                    && candidates.iter().any(|c| {
+                        c.endpoint_id != self.endpoint_id && self.endpoint_id < c.endpoint_id
+                    })
+                {
+                    warn!(
+                        "Conflict detected for {:?} during acquisition wait. Aborting.",
                         ip_candidate.ip
                     );
-                    if self
-                        .write_ip_assignment(ip_candidate.ip, ip_candidate.endpoint_id)
-                        .await
-                        .is_ok()
-                    {
-                        info!("Successfully assigned IP: {}", ip_candidate.ip);
-                        self.my_ip = RouterIp::AssignedIp(ip_candidate.ip);
-                    } else {
-                        warn!(
-                            "Failed to assign IP {}. Restarting negotiation.",
+                    self.clear_ip_candidate(ip_candidate.ip, ip_candidate.endpoint_id)
+                        .await?;
+                    self.my_ip = RouterIp::NoIp;
+                    return Ok(false);
+                }
+
+                // Wait at least 5 seconds
+                if elapsed > Duration::from_secs(5) {
+                    // Jitter: 20% chance to proceed per tick (approx 500ms)
+                    if rand::rng().random_bool(0.2) {
+                        info!(
+                            "Attempting to finalize IP assignment for {}",
                             ip_candidate.ip
                         );
-                        self.my_ip = RouterIp::NoIp;
+                        if self
+                            .write_ip_assignment(ip_candidate.ip, ip_candidate.endpoint_id)
+                            .await
+                            .is_ok()
+                        {
+                            info!(
+                                "Written assignment for IP: {}. Verifying...",
+                                ip_candidate.ip
+                            );
+                            self.my_ip =
+                                RouterIp::VerifyingIp(ip_candidate.ip, tokio::time::Instant::now());
+                        } else {
+                            warn!(
+                                "Failed to write assignment for {}. Restarting negotiation.",
+                                ip_candidate.ip
+                            );
+                            self.clear_ip_candidate(ip_candidate.ip, ip_candidate.endpoint_id)
+                                .await
+                                .ok();
+                            self.my_ip = RouterIp::NoIp;
+                        }
                     }
                 }
                 Ok(false)
             }
-            _ => Ok(true),
+            RouterIp::VerifyingIp(ip, start_time) => {
+                // Wait 2 seconds to ensure propagation
+                if start_time.elapsed() > Duration::from_secs(2) {
+                    trace!("Verifying IP assignment logic for {}", ip);
+                    let assignment = self.read_ip_assignment(ip).await;
+                    match assignment {
+                        Ok(a) if a.endpoint_id == self.endpoint_id => {
+                            info!("Verified ownership of IP: {}", ip);
+                            self.my_ip = RouterIp::AssignedIp(ip);
+                        }
+                        _ => {
+                            warn!(
+                                "Verification failed for IP: {}. Lost to another node or ghost.",
+                                ip
+                            );
+                            self.my_ip = RouterIp::NoIp;
+                        }
+                    }
+                }
+                Ok(false)
+            }
+            RouterIp::AssignedIp(my_ip) => {
+                match self.read_ip_assignment(my_ip).await {
+                    Ok(ip_assignment) => {
+                        if ip_assignment.endpoint_id != self.endpoint_id {
+                            self.my_ip = RouterIp::NoIp;
+                            warn!(
+                                "Lost IP assignment for {}. Expected owner: {}, Found: {}. Restarting negotiation.",
+                                my_ip, self.endpoint_id, ip_assignment.endpoint_id
+                            );
+                            Ok(false)
+                        } else {
+                            // Refresh if needed (every 60s)
+                            if current_time() - ip_assignment.last_updated > 60 {
+                                info!("Refreshing IP assignment for {}", my_ip);
+                                if let Err(e) =
+                                    self.write_ip_assignment(my_ip, self.endpoint_id).await
+                                {
+                                    warn!("Failed to refresh IP assignment: {:?}", e);
+                                    // Don't lose IP immediately, retry next tick
+                                }
+                            }
+                            Ok(true)
+                        }
+                    }
+                    Err(_) => {
+                        self.my_ip = RouterIp::NoIp;
+                        warn!("Assignment lost/deleted for {}. Restarting.", my_ip);
+                        Ok(false)
+                    }
+                }
+            }
         }
     }
 
@@ -599,36 +714,67 @@ impl RouterActor {
         let all_assigned = self.read_all_ip_assignments().await?;
         let all_candidates = self.read_all_ip_candidates().await?;
 
-        let all_ips = all_assigned
+        let mut used_ips = all_assigned
             .iter()
-            .map(|assigned| assigned.ip)
-            .chain(all_candidates.iter().map(|candidate| candidate.ip))
-            .collect::<Vec<_>>();
-
-        let highest_ip = if all_ips.is_empty() {
-            Ipv4Addr::new(172, 22, 0, 2)
-        } else {
-            *all_ips
+            .map(|ip_assignment| ip_assignment.ip)
+            .collect::<HashSet<_>>();
+        used_ips.extend(
+            all_candidates
                 .iter()
-                .max_by_key(|&&ip| ip.octets()[2] as u16 * 256u16 + ip.octets()[3] as u16)
-                .expect("no ips found")
-        };
-
-        let next_ip = Ipv4Addr::new(
-            172,
-            22,
-            if highest_ip.octets()[3] == 255 { 1 } else { 0 } + highest_ip.octets()[2],
-            if highest_ip.octets()[3] == 255 {
-                0
-            } else {
-                highest_ip.octets()[3] + 1
-            },
+                .map(|ip_candidate| ip_candidate.ip)
+                .collect::<HashSet<_>>(),
         );
 
-        // to avoid overflow and therefore duplicates we check if this ip is already contained
-        if all_ips.contains(&next_ip) {
-            bail!("no more ips available");
+        // Scan for the first available IP starting from 172.22.0.2
+        for i in 2u16..65534 {
+            let octet3 = (i >> 8) as u8;
+            let octet4 = (i & 0xFF) as u8;
+
+            // Skip network/broadcast addresses if needed, though 172.22.0.0/16 is a large subnet.
+            // Keeping it simple: avoid .0 and .255 in the last octet to be safe for standard /24 clients
+            if octet4 == 0 || octet4 == 255 {
+                continue;
+            }
+
+            let ip = Ipv4Addr::new(172, 22, octet3, octet4);
+            if !used_ips.contains(&ip) {
+                return Ok(ip);
+            }
         }
-        Ok(next_ip)
+
+        bail!("no more ips available");
+    }
+
+    async fn perform_cleanup(&mut self) -> Result<()> {
+        let now = current_time();
+
+        // Cleanup assignments
+        let assignments = self.read_all_ip_assignments().await?;
+        for a in assignments {
+            if now.saturating_sub(a.last_updated) > 120 {
+                info!(
+                    "Removing stale IP assignment for {} (last updated {}s ago)",
+                    a.ip,
+                    now - a.last_updated
+                );
+                if let Err(e) = self.doc.del(self.author_id, key_ip_assigned(a.ip)).await {
+                    warn!("Failed to delete stale IP {}: {:?}", a.ip, e);
+                }
+            }
+        }
+
+        // Cleanup candidates
+        let candidates = self.read_all_ip_candidates().await?;
+        for c in candidates {
+            if now.saturating_sub(c.last_updated) > 30 {
+                info!(
+                    "Removing stale IP candidate for {} (last updated {}s ago)",
+                    c.ip,
+                    now - c.last_updated
+                );
+                self.clear_ip_candidate(c.ip, c.endpoint_id).await.ok();
+            }
+        }
+        Ok(())
     }
 }

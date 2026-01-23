@@ -66,15 +66,13 @@ async fn run_headless(name: String, password: String) -> Result<()> {
 
     println!("Starting network '{}'...", name);
 
-    while matches!(
-        network.get_router_state().await?,
-        RouterIp::NoIp | RouterIp::AquiringIp(_, _)
-    ) {
+    loop {
+        let state = network.get_router_state().await?;
+        if let RouterIp::AssignedIp(ip) = state {
+            println!("My IP is {}", ip);
+            break;
+        }
         sleep(std::time::Duration::from_millis(500)).await;
-    }
-
-    if let RouterIp::AssignedIp(ip) = network.get_router_state().await? {
-        println!("My IP is {}", ip);
     }
 
     // Keep running
@@ -212,6 +210,10 @@ async fn update_state(network: &Network, state: &mut AppState) -> Result<()> {
         Ok(RouterIp::AquiringIp(_, _)) => {
             state.status = "Acquiring IP...".to_string();
             state.my_ip = "Acquiring...".to_string();
+        }
+        Ok(RouterIp::VerifyingIp(_, _)) => {
+            state.status = "Verifying IP...".to_string();
+            state.my_ip = "Verifying...".to_string();
         }
         Ok(RouterIp::AssignedIp(ip)) => {
             state.status = "Connected".to_string();
