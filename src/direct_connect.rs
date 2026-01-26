@@ -2,12 +2,16 @@ use actor_helper::{Action, Handle, act};
 use anyhow::Result;
 use iroh::{
     EndpointId,
-    endpoint::Connection,
+    endpoint::{Connection, VarInt},
     protocol::ProtocolHandler,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, hash_map::Entry};
-use tracing::{debug, info, trace, warn, error};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    time::Duration,
+};
+use tokio::time::timeout;
+use tracing::{debug, error, info, trace};
 
 use crate::{auth, connection::Conn, local_networking::Ipv4Pkg};
 
@@ -22,7 +26,7 @@ struct DirectActor {
     peers: HashMap<EndpointId, Conn>,
     endpoint: iroh::endpoint::Endpoint,
     rx: actor_helper::Receiver<Action<DirectActor>>,
-    direct_connect_tx: tokio::sync::broadcast::Sender<DirectMessage>,
+    direct_connect_tx: tokio::sync::mpsc::Sender<DirectMessage>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -32,10 +36,10 @@ pub enum DirectMessage {
 }
 
 impl Direct {
-    pub const ALPN: &[u8] = b"/iroh/lan-direct/1";
+    pub const ALPN: &[u8] = b"/iroh/lan-direct/1.0.1";
     pub fn new(
         endpoint: iroh::endpoint::Endpoint,
-        direct_connect_tx: tokio::sync::broadcast::Sender<DirectMessage>,
+        direct_connect_tx: tokio::sync::mpsc::Sender<DirectMessage>,
         network_secret: &[u8; 64],
     ) -> Self {
         let (api, rx) = Handle::channel();
@@ -62,6 +66,12 @@ impl Direct {
             .await
     }
 
+    pub async fn ensure_connection(&self, to: EndpointId) -> Result<()> {
+        self.api
+            .call(act!(actor => actor.ensure_connection(to)))
+            .await
+    }
+
     pub async fn get_endpoint(&self) -> iroh::endpoint::Endpoint {
         self.api
             .call(act!(actor => actor.get_endpoint()))
@@ -85,11 +95,17 @@ impl Direct {
 
 impl DirectActor {
     async fn run(&mut self) -> Result<()> {
+        let mut cleanup_interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         debug!("DirectActor run loop started");
         loop {
             tokio::select! {
                 Ok(action) = self.rx.recv_async() => {
                     action(self).await;
+                }
+                _ = cleanup_interval.tick() => {
+                    self.prune_closed_connections().await;
                 }
                 _ = tokio::signal::ctrl_c() => {
                      info!("Ctrl-C received, shutting down DirectActor");
@@ -100,32 +116,94 @@ impl DirectActor {
         Ok(())
     }
 
+    async fn prune_closed_connections(&mut self) {
+        let mut to_remove = Vec::new();
+        for (id, conn) in &self.peers {
+            if conn.get_state().await == crate::connection::ConnState::Closed {
+                to_remove.push(*id);
+            }
+        }
+        for id in to_remove {
+            debug!("Removing closed connection to {}", id);
+            self.peers.remove(&id);
+        }
+    }
+
     async fn handle_connection(&mut self, conn: iroh::endpoint::Connection) -> Result<()> {
         info!("New direct connection from {:?}", conn.remote_id());
         let remote_id = conn.remote_id();
+        let prefer_incoming = self.endpoint.id() > remote_id;
 
         match self.peers.entry(remote_id) {
             Entry::Occupied(mut entry) => {
-                debug!("Existing connection found for {}, upgrading/resetting", remote_id);
-                let (send_stream, recv_stream) =
-                    auth::accept(&conn, &self.network_secret, self.endpoint.id(), remote_id)
+                let state = entry.get().get_state().await;
+                if state != crate::connection::ConnState::Open || prefer_incoming {
+                    if state != crate::connection::ConnState::Open {
+                        info!(
+                            "Replacing existing connection to {} in state {:?}",
+                            remote_id, state
+                        );
+                    }
+                    debug!(
+                        "Existing connection found for {}, upgrading/resetting",
+                        remote_id
+                    );
+                    let accept_result = timeout(
+                        Duration::from_secs(60),
+                        auth::accept(&conn, &self.network_secret, self.endpoint.id(), remote_id),
+                    )
+                    .await;
+                    let (ctrl_send, ctrl_recv, data_send, data_recv) = match accept_result {
+                        Ok(Ok(streams)) => streams,
+                        Ok(Err(e)) => {
+                            error!("Auth accept failed from {}: {}", remote_id, e);
+                            return Err(e);
+                        }
+                        Err(_) => {
+                            error!("Auth accept timed out from {} [Occupied]", remote_id);
+                            conn.close(VarInt::from_u32(408), b"accept timeout");
+                            return Err(anyhow::anyhow!("auth accept timed out"));
+                        }
+                    };
+                    entry
+                        .get_mut()
+                        .incoming_connection(conn, ctrl_send, ctrl_recv, data_send, data_recv)
                         .await?;
-                entry
-                    .get_mut()
-                    .incoming_connection(conn, send_stream, recv_stream)
-                    .await?;
+                } else {
+                    info!(
+                        "Ignoring incoming connection from {} (keeping existing connection)",
+                        remote_id
+                    );
+                    conn.close(VarInt::from_u32(409), b"duplicate connection");
+                }
             }
             Entry::Vacant(entry) => {
                 debug!("New connection entry for {}", remote_id);
-                let (send_stream, recv_stream) =
-                    auth::accept(&conn, &self.network_secret, self.endpoint.id(), remote_id)
-                        .await?;
+                let accept_result = timeout(
+                    Duration::from_secs(60),
+                    auth::accept(&conn, &self.network_secret, self.endpoint.id(), remote_id),
+                )
+                .await;
+                let (ctrl_send, ctrl_recv, data_send, data_recv) = match accept_result {
+                    Ok(Ok(streams)) => streams,
+                    Ok(Err(e)) => {
+                        error!("Auth accept failed from {}: {}", remote_id, e);
+                        return Err(e);
+                    }
+                    Err(_) => {
+                        error!("Auth accept timed out from {} [Vacant]", remote_id);
+                        conn.close(VarInt::from_u32(408), b"accept timeout");
+                        return Err(anyhow::anyhow!("auth accept timed out"));
+                    }
+                };
                 entry.insert(
                     Conn::new(
                         self.endpoint.clone(),
                         conn,
-                        send_stream,
-                        recv_stream,
+                        ctrl_send,
+                        ctrl_recv,
+                        data_send,
+                        data_recv,
                         self.direct_connect_tx.clone(),
                         &self.network_secret,
                     )
@@ -141,15 +219,9 @@ impl DirectActor {
         trace!("Routing packet to {}", to);
         match self.peers.entry(to) {
             Entry::Occupied(entry) => {
-                if entry.get().get_state().await == crate::connection::ConnState::Closed {
-                    warn!("Connection to peer {} is closed, removing from peers", to);
-                    entry.remove();
-                    return Err(anyhow::anyhow!("connection to peer is not running"));
-                }
-                
                 if let Err(e) = entry.get().write(pkg).await {
-                     error!("Failed to write packet to peer {}: {:?}", to, e);
-                     return Err(e);
+                    error!("Failed to write packet to peer {}: {}", to, e);
+                    return Err(e);
                 }
             }
             Entry::Vacant(entry) => {
@@ -163,13 +235,30 @@ impl DirectActor {
                 .await;
 
                 if let Err(e) = conn.write(pkg).await {
-                    error!("Failed to write packet to new connection {}: {:?}", to, e);
+                    error!("Failed to write packet to new connection {}: {}", to, e);
                     return Err(e);
                 }
                 entry.insert(conn);
             }
         }
 
+        Ok(())
+    }
+
+    async fn ensure_connection(&mut self, to: EndpointId) -> Result<()> {
+        if self.peers.contains_key(&to) {
+            return Ok(());
+        }
+
+        info!("No active connection to {}, initiating new connection", to);
+        let conn = Conn::connect(
+            self.endpoint.clone(),
+            to,
+            self.direct_connect_tx.clone(),
+            &self.network_secret,
+        )
+        .await;
+        self.peers.insert(to, conn);
         Ok(())
     }
 

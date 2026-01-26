@@ -32,7 +32,6 @@ use actor_helper::{Action, Actor, Handle, act, act_ok};
 pub struct Builder {
     entry_name: String,
     secret_key: SecretKey,
-    creator_mode: bool,
     password: String,
     endpoint: Option<Endpoint>,
     gossip: Option<Gossip>,
@@ -52,11 +51,6 @@ impl Builder {
 
     pub fn secret_key(mut self, secret_key: SecretKey) -> Self {
         self.secret_key = secret_key;
-        self
-    }
-
-    pub fn creator_mode(mut self) -> Self {
-        self.creator_mode = true;
         self
     }
 
@@ -115,25 +109,14 @@ impl Builder {
 
         let signing_key = SigningKey::from_bytes(&self.secret_key.to_bytes());
         let topic_discovery_config = TopicDiscoveryConfig::new(signing_key);
-        let (gossip_sender, gossip_receiver, topic_handle) = if self.creator_mode {
-            gossip
-                .subscribe_with_discovery(
-                    topic_hash.to_vec(),
-                    vec![],
-                    endpoint.clone(),
-                    topic_discovery_config,
-                )
-                .await?
-        } else {
-            gossip
-                .subscribe_with_discovery_joined(
-                    topic_hash.to_vec(),
-                    vec![],
-                    endpoint.clone(),
-                    topic_discovery_config,
-                )
-                .await?
-        };
+        let (gossip_sender, gossip_receiver, topic_handle) = gossip
+            .subscribe_with_discovery_joined(
+                topic_hash.to_vec(),
+                vec![],
+                endpoint.clone(),
+                topic_discovery_config,
+            )
+            .await?;
 
         let doc_peers = gossip_receiver
             .neighbors()
@@ -150,11 +133,16 @@ impl Builder {
             })
             .await?;
 
+        let wait_start = tokio::time::Instant::now();
         while match doc.get_sync_peers().await {
             Ok(Some(peers)) => peers.is_empty(),
             Ok(None) => true,
             Err(_) => true,
         } {
+            if wait_start.elapsed() > Duration::from_secs(10) {
+                warn!("Doc sync peers not available yet; continuing without peers");
+                break;
+            }
             debug!("Waiting for doc to be ready...");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -183,7 +171,6 @@ impl Builder {
 impl Default for Builder {
     fn default() -> Self {
         Self {
-            creator_mode: false,
             entry_name: String::default(),
             secret_key: SecretKey::generate(&mut rand::rng()),
             password: String::default(),
@@ -320,16 +307,16 @@ impl Actor<anyhow::Error> for RouterActor {
                             last_ip_state = self.my_ip.clone();
                         },
                         Err(e) => {
-                            warn!("Error advancing IP state: {:?}", e);
+                            warn!("Error advancing IP state: {}", e);
                         }
                     }
                 }
 
                 _ = cleanup_tick.tick() => {
                     trace!("Cleanup tick");
-                     if let Err(e) = self.perform_cleanup().await {
-                         warn!("Error performing cleanup: {:?}", e);
-                     }
+                    if let Err(e) = self.perform_cleanup().await {
+                        warn!("Error performing cleanup: {}", e);
+                    }
                 }
             }
         }
@@ -693,7 +680,7 @@ impl RouterActor {
                                 if let Err(e) =
                                     self.write_ip_assignment(my_ip, self.endpoint_id).await
                                 {
-                                    warn!("Failed to refresh IP assignment: {:?}", e);
+                                    warn!("Failed to refresh IP assignment: {}", e);
                                     // Don't lose IP immediately, retry next tick
                                 }
                             }
@@ -758,7 +745,7 @@ impl RouterActor {
                     now - a.last_updated
                 );
                 if let Err(e) = self.doc.del(self.author_id, key_ip_assigned(a.ip)).await {
-                    warn!("Failed to delete stale IP {}: {:?}", a.ip, e);
+                    warn!("Failed to delete stale IP {}: {}", a.ip, e);
                 }
             }
         }

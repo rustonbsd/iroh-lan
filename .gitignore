@@ -25,3 +25,5 @@ target
 
 /target
 .DS_Store
+
+docker_test/results_stress

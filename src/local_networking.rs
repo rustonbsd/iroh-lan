@@ -7,8 +7,12 @@ use pnet_packet::{
     udp::{MutableUdpPacket, ipv4_checksum as udp_ipv4_checksum},
 };
 use serde::{Deserialize, Serialize};
-use std::{fmt::Debug, net::Ipv4Addr};
-use tracing::{debug, error, info, trace, warn};
+use std::{
+    fmt::Debug,
+    net::Ipv4Addr,
+    time::{Duration, Instant},
+};
+use tracing::{info, trace, warn};
 use tun_rs::{AsyncDevice, DeviceBuilder, Layer};
 
 use actor_helper::{Action, Handle, act};
@@ -45,14 +49,15 @@ impl Ipv4Pkg {
 #[derive(Debug, Clone)]
 pub struct Tun {
     api: Handle<TunActor, anyhow::Error>,
+    tun_tx: tokio::sync::mpsc::Sender<Ipv4Pkg>,
 }
 
 struct TunActor {
     ip: Ipv4Addr,
     dev: AsyncDevice,
     rx: actor_helper::Receiver<Action<TunActor>>,
-    to_remote_writer: tokio::sync::broadcast::Sender<Ipv4Pkg>,
-    _keep_alive_to_remote_writer: tokio::sync::broadcast::Receiver<Ipv4Pkg>,
+    tun_rx: tokio::sync::mpsc::Receiver<Ipv4Pkg>,
+    to_remote_writer: tokio::sync::mpsc::Sender<Ipv4Pkg>,
 }
 
 impl Debug for TunActor {
@@ -67,7 +72,7 @@ impl Debug for TunActor {
 impl Tun {
     pub async fn new(
         free_ip_ending: (u8, u8),
-        to_remote_writer: tokio::sync::broadcast::Sender<Ipv4Pkg>,
+        to_remote_writer: tokio::sync::mpsc::Sender<Ipv4Pkg>,
     ) -> Result<Self> {
         let ip = Ipv4Addr::new(172, 22, free_ip_ending.0, free_ip_ending.1);
 
@@ -81,6 +86,7 @@ impl Tun {
             .build_async()?;
 
         let (api, rx) = Handle::channel();
+        let (tun_tx, tun_rx) = tokio::sync::mpsc::channel(1024 * 16);
 
         tokio::spawn(async move {
             let mut actor = TunActor {
@@ -88,20 +94,19 @@ impl Tun {
                 to_remote_writer: to_remote_writer.clone(),
                 dev,
                 rx,
-                _keep_alive_to_remote_writer: to_remote_writer.subscribe(),
+                tun_rx,
             };
             let _ = actor.run().await;
         });
 
-        Ok(Self { api })
+        Ok(Self { api, tun_tx })
     }
 
     pub async fn write(&self, pkg: Ipv4Pkg) -> Result<()> {
-        self.api.call(act!(actor => actor.write_to_tun(pkg))).await
-    }
-
-    pub async fn subscribe(&self) -> Result<tokio::sync::broadcast::Receiver<Ipv4Pkg>> {
-        self.api.call(act!(actor => actor.subscribe())).await
+        match self.tun_tx.send(pkg).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(anyhow::anyhow!("Tun actor closed: {}", e)),
+        }
     }
 
     pub async fn close(&self) -> Result<()> {
@@ -119,10 +124,22 @@ impl TunActor {
         info!("TunActor started for IP: {}", self.ip);
         loop {
             tokio::select! {
-
                 Ok(action) = self.rx.recv_async() => {
                     action(self).await;
                 }
+
+                // Write path: Network -> TUN
+                Some(pkg) = self.tun_rx.recv() => {
+                    if let Ok(packet) = pkg.to_ipv4_packet() {
+                        let data = packet.packet();
+                        match self.dev.send(data).await {
+                            Ok(_) => {}
+                            Err(e) => warn!("Failed to write to TUN: {}", e),
+                        }
+                    }
+                }
+
+                // Read path: TUN -> Network
                 Ok(len) = self.dev.recv(&mut dev_buf) => {
                     if let Some(mut ipv4_packet) = MutableIpv4Packet::new(&mut dev_buf[..len]) {
                         let source = ipv4_packet.get_source();
@@ -135,6 +152,14 @@ impl TunActor {
                                 source,
                                 destination
                             );
+                            continue;
+                        }
+
+                        if !matches!(
+                            ipv4_packet.get_next_level_protocol(),
+                            IpNextHeaderProtocols::Tcp | IpNextHeaderProtocols::Udp | IpNextHeaderProtocols::Icmp
+                        ) {
+                            trace!("Ignored packet protocol: {:?}", ipv4_packet.get_next_level_protocol());
                             continue;
                         }
 
@@ -166,78 +191,28 @@ impl TunActor {
                             }
                             _ => {}
                         }
-                    }
 
-                    if let Ok(ip_pkg) = Ipv4Pkg::new(&dev_buf[..len]) {
-                        let ip_pkg = ip_pkg.to_ipv4_packet().expect("this should have been validated during 'Ipv4Pkg::new' creation");
-
-                        if matches!(
-                            ip_pkg.get_next_level_protocol(),
-                            IpNextHeaderProtocols::Tcp | IpNextHeaderProtocols::Udp | IpNextHeaderProtocols::Icmp
-                        ) {
-                            trace!(
-                                "TUN recv: Proto: {:?}, Src: {}, Dst: {}",
-                                ip_pkg.get_next_level_protocol(),
-                                ip_pkg.get_source(),
-                                ip_pkg.get_destination(),
-                            );
-
-                            if ip_pkg.get_destination() == self.ip {
-                                debug!("Packet destined for local IP {}, injecting back into TUN", self.ip);
-                                if let Err(e) = self.dev.send(ip_pkg.packet()).await {
-                                     warn!("Failed to inject packet back to TUN: {:?}", e);
-                                }
-                            } else {
-                                trace!("Forwarding packet to remote writer");
-                                let _res = self.to_remote_writer.send(ip_pkg.into());
-                                if _res.is_err() {
-                                     warn!("Failed to forward packet to remote writer, no receivers?");
-                                }
+                        if let Ok(pkg) = Ipv4Pkg::new(ipv4_packet.packet()) {
+                            let start = Instant::now();
+                            if let Err(e) = self.to_remote_writer.send(pkg).await {
+                                warn!("Failed to forward packet from TUN to network: {}", e);
+                            } else if start.elapsed() > Duration::from_millis(5) {
+                                warn!("TUN->network backpressure: send blocked {} ms", start.elapsed().as_millis());
                             }
-                        } else {
-                             trace!("Ignored packet protocol: {:?}", ip_pkg.get_next_level_protocol());
                         }
                     } else {
                         warn!("Failed to parse packet from TUN");
                     }
                 }
+
                 _ = tokio::signal::ctrl_c() => {
                     info!("Ctrl-C received, shutting down TunActor");
                     break
                 }
             }
         }
+        self.close().await?;
         Ok(())
-    }
-
-    // validated write
-    pub async fn write_to_tun(&self, pkg: Ipv4Pkg) -> Result<()> {
-        let packet = pkg.to_ipv4_packet()?;
-        let data = packet.packet();
-        trace!(
-            "Writing packet to TUN. Src: {}, Dst: {}, Len: {}",
-            packet.get_source(),
-            packet.get_destination(),
-            data.len()
-        );
-
-        match self.dev.send(data).await {
-            Ok(len) => {
-                if len != data.len() {
-                    warn!("Short write to TUN. Expected {}, wrote {}", data.len(), len);
-                }
-            }
-            Err(e) => {
-                error!("Failed to write to TUN: {:?}", e);
-                return Err(e.into());
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn subscribe(&mut self) -> Result<tokio::sync::broadcast::Receiver<Ipv4Pkg>> {
-        trace!("New subscriber for TUN packets");
-        Ok(self.to_remote_writer.subscribe())
     }
 
     pub async fn close(&mut self) -> Result<()> {

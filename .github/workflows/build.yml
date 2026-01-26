@@ -23,9 +23,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Stress Test
-        # Run test for 2 minutes to ensure stability
+        # Run test for 10 minutes to ensure stability
         run: |
-          export GAME_TEST_DURATION=2
+          export GAME_TEST_DURATION=10
           make stress-test
 
   approve-build:

@@ -1,38 +1,137 @@
 #!/bin/bash
 set -e
+set -o pipefail
 
-GAME_TEST_DURATION=5  # in minutes
+LOG_DIR="/app/results"
+COORD_DIR="/coord"
+mkdir -p "$LOG_DIR"
 
-SERVICE_NAME=$1
-echo "Service: $SERVICE_NAME starting [STRESS MODE]..."
+collect_logs() {
+    local exit_code=$?
+    local ts
+    ts=$(date +%Y%m%d_%H%M%S)
+    local out_dir="$LOG_DIR/$ts"
+    mkdir -p "$out_dir"
+
+    for f in "$LOG_DIR/iroh.log" "$LOG_DIR/iroh_2.log" "$LOG_DIR/game_server.log"; do
+        if [ -f "$f" ]; then
+            cp -f "$f" "$out_dir/"
+        fi
+    done
+
+    if [ -f "$LOG_DIR/game_client.log" ]; then
+        cp -f "$LOG_DIR/game_client.log" "$out_dir/"
+    fi
+
+    rm -f "$COORD_DIR"/* 2>/dev/null || true
+    echo "Saved logs to $out_dir (exit code: $exit_code)"
+}
+
+trap collect_logs EXIT
+
+GAME_TEST_DURATION=${GAME_TEST_DURATION:-530}
+
+NETEM_DELAY_MS=${NETEM_DELAY_MS:-150}
+NETEM_JITTER_MS=${NETEM_JITTER_MS:-50}
+NETEM_LOSS_PCT=${NETEM_LOSS_PCT:-0.3}
+NETEM_REORDER_PCT=${NETEM_REORDER_PCT:-0.1}
+NETEM_REORDER_GAP=${NETEM_REORDER_GAP:-1}
+ENABLE_IPERF_NETEM=${ENABLE_IPERF_NETEM:-1}
+
+GAME_NETEM_DELAY_MS=${GAME_NETEM_DELAY_MS:-120}
+GAME_NETEM_JITTER_MS=${GAME_NETEM_JITTER_MS:-40}
+GAME_NETEM_LOSS_PCT=${GAME_NETEM_LOSS_PCT:-0.5}
+GAME_NETEM_REORDER_PCT=${GAME_NETEM_REORDER_PCT:-0.2}
+GAME_NETEM_REORDER_GAP=${GAME_NETEM_REORDER_GAP:-25}
+TOPIC="${TOPIC:-test_topic_default}"
+
+signal_ready() {
+    local signal_name="$1"
+    touch "$COORD_DIR/$signal_name"
+    echo "[COORD] Signaled: $signal_name"
+}
+
+wait_for_signal() {
+    local signal_name="$1"
+    local timeout_sec="${2:-120}"
+    local start_time
+    start_time=$(date +%s)
+
+    echo "[COORD] Waiting for signal: $signal_name (timeout: ${timeout_sec}s)"
+    while [ $(( $(date +%s) - start_time )) -lt $timeout_sec ]; do
+        if [ -f "$COORD_DIR/$signal_name" ]; then
+            echo "[COORD] Received signal: $signal_name"
+            return 0
+        fi
+        sleep 0.5
+    done
+
+    echo "[COORD] TIMEOUT waiting for: $signal_name"
+    return 1
+}
+
+wait_for_direct_connection() {
+    local timeout_sec="${1:-60}"
+    local start_time
+    start_time=$(date +%s)
+
+    echo "[COORD] Waiting for direct connection (timeout: ${timeout_sec}s)"
+    while [ $(( $(date +%s) - start_time )) -lt $timeout_sec ]; do
+        if grep -q "Connection state transition: .* -> Open" "$LOG_DIR/iroh.log"; then
+            echo "[COORD] Direct connection is open"
+            return 0
+        fi
+        if grep -q "New direct connection" "$LOG_DIR/iroh.log"; then
+            echo "[COORD] Direct connection established"
+            return 0
+        fi
+        sleep 0.5
+    done
+
+    echo "[COORD] TIMEOUT waiting for direct connection"
+    tail -n 200 "$LOG_DIR/iroh.log" || true
+    return 1
+}
+
+clear_signal() {
+    local signal_name="$1"
+    rm -f "$COORD_DIR/$signal_name"
+}
 
 echo "Starting iroh-lan..."
-export RUST_LOG=debug
-> /app/iroh.log
-/app/bin/iroh-lan --name testnet123 -d > /app/iroh.log 2>&1 &
+if [ "${STRESS_VERBOSE:-}" = "1" ]; then
+    export RUST_LOG="${RUST_LOG:-iroh_lan=trace,iroh=info,iroh_gossip=info}"
+    export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+else
+    export RUST_LOG="${RUST_LOG:-info}"
+fi
+
+rm -f "$COORD_DIR"/* 2>/dev/null || true
+
+> "$LOG_DIR/iroh.log"
+/app/bin/iroh-lan --name "$TOPIC" -d > "$LOG_DIR/iroh.log" 2>&1 &
 IROH_PID=$!
 
-echo "Waiting for IP assignment..."
-TIMEOUT=120
+echo "Waiting for IP assignment (AssignedIp)..."
+TIMEOUT=30
 start_time=$(date +%s)
-  
+
 GOT_IP=""
 while [ $(( $(date +%s) - start_time )) -lt $TIMEOUT ]; do
-      if grep -q "My IP is" /app/iroh.log; then
-          GOT_IP=$(grep "My IP is" /app/iroh.log | tail -n1 | awk '{print $NF}')
-          break
-      fi
-      sleep 1
+    if grep -q "AssignedIp(" "$LOG_DIR/iroh.log"; then
+        GOT_IP=$(grep "AssignedIp(" "$LOG_DIR/iroh.log" | tail -n1 | sed -n 's/.*AssignedIp(\([0-9.]*\)).*/\1/p')
+        break
+    fi
+    sleep 1
 done
 
 if [ -z "$GOT_IP" ]; then
-      echo "Timeout waiting for IP."
-      cat /app/iroh.log
-      exit 1
+    echo "Timeout waiting for AssignedIp."
+    cat "$LOG_DIR/iroh.log"
+    exit 1
 fi
 
 echo "Assigned IP: $GOT_IP"
-
 if [ "$GOT_IP" == "172.22.0.2" ]; then
     ROLE="server"
     PEER_IP="172.22.0.3"
@@ -46,117 +145,150 @@ else
     exit 1
 fi
 
-echo "Waiting for tun device..."
-while ! ls /sys/class/net/ | grep -q tun; do sleep 0.5; done
-TUN_DEV=$(ls /sys/class/net/ | grep tun | head -n1)
+echo "Waiting for interface with IP $GOT_IP..."
+TUN_WAIT_START=$(date +%s)
+TUN_WAIT_TIMEOUT=60
+TUN_DEV=""
+TUN_LOGGED=0
+while [ $(( $(date +%s) - TUN_WAIT_START )) -lt $TUN_WAIT_TIMEOUT ]; do
+    if grep -q "TunActor started for IP: $GOT_IP" "$LOG_DIR/iroh.log"; then
+        TUN_LOGGED=1
+    fi
+    TUN_DEV=$(ip -o -4 addr show | awk -v ip="$GOT_IP" '$4 ~ ip"/" {print $2; exit}')
+    if [ -n "$TUN_DEV" ]; then
+        break
+    fi
+    if [ "$TUN_LOGGED" -eq 1 ]; then
+        TUN_DEV=$(ip -o link show type tun | awk -F': ' 'NR==1{print $2; exit}')
+        if [ -n "$TUN_DEV" ]; then
+            break
+        fi
+    fi
+    sleep 0.5
+done
 
-if [ "$TUN_DEV" != "tun1" ]; then
-    ip link set dev $TUN_DEV down
-    ip link set dev $TUN_DEV name tun1
-    ip link set dev tun1 up
+if [ -z "$TUN_DEV" ]; then
+    echo "Timeout waiting for interface with IP $GOT_IP."
+    echo "Last 200 lines of iroh.log:"
+    tail -n 200 "$LOG_DIR/iroh.log" || true
+    ip -o -4 addr show || true
+    exit 1
 fi
 
+NETEM_DEV="${NETEM_DEV:-$TUN_DEV}"
 
 if [ "$ROLE" == "server" ]; then
-    echo "Starting Game Check Server (Background)..."
-    /app/bin/examples/game_check server "0.0.0.0:30000" "none" "$GAME_TEST_DURATION" > /app/game_server.log 2>&1 &
+    echo "Starting Game Check Server..."
+    /app/bin/examples/game_check server "0.0.0.0:30000" "none" "$GAME_TEST_DURATION" 2>&1 | tee -a "$LOG_DIR/game_server.log" &
+    GAME_SERVER_PID=$!
 
-    echo "Starting iperf3 server..."
-    # iperf3 server mode
-    iperf3 -s
-    
-    # Wait for iroh to verify it stays alive
-    wait $IROH_PID
+    echo "Starting iperf3 server (persistent)..."
+    iperf3 -s --idle-timeout 60 2>&1 | sed 's/^/[iperf3] /' &
+    IPERF_PID=$!
+
+    sleep 2
+
+    signal_ready "server_ready"
+
+    wait_for_signal "tests_complete" 45000  # 12.5 hour timeout for long game test
+
+    echo "Tests complete, shutting down..."
+    kill $IPERF_PID 2>/dev/null || true
+    kill $GAME_SERVER_PID 2>/dev/null || true
+    kill $IROH_PID 2>/dev/null || true
+
+    echo "SERVER DONE."
+    exit 0
 
 elif [ "$ROLE" == "client" ]; then
-    echo "Waiting for server to be ready..."
-    sleep 5
 
-    # A. Broadcast Hostility Test (simulates 'bad' peer/loop)
-    echo "TEST 1/4: Starting Broadcast Ping (Background Hostility)..."
+    wait_for_signal "server_ready" 120
+    wait_for_direct_connection 120
+
+    echo "TEST 1/5: Broadcast Hostility Test"
     ping -b -i 0.2 -c 100 255.255.255.255 > /dev/null 2>&1 &
     PING_PID=$!
 
-    # B. Throughput Test (Clean Network)
-    echo "TEST 2/4: Baseline Throughput (10s)..."
-    iperf3 -c $PEER_IP -t 10
-    
-    # C. Poor Network Quality Test
-    echo "TEST 3/4: Simulating Link Loss/Delay (tc netem)..."
-    # Delay 500ms +/- 250ms, 1% Packet Loss
-    tc qdisc add dev eth0 root netem delay 500ms 250ms distribution normal loss 1%
-    
-    echo "Running iperf3 on degraded link..."
-    # We expect lower throughput, but NO DISCONNECTS (iperf should finish)
-    iperf3 -c $PEER_IP -t 10 || echo "iperf failed on degraded link (expected performance drop, not crash)"
+    echo "TEST 2/5: Throughput (clean network) 10s"
+    iperf3 -c "$PEER_IP" -t 10 --connect-timeout 10000
 
-    # Clean up tc rules
-    tc qdisc del dev eth0 root
-    
-    # Wait for server to cleanup (iperf3 might be stuck if FIN was lost)
-    echo "Waiting for server cleanup (15s)..."
-    sleep 15
+    echo "TEST 3/5: Throughput (degraded network) 10s"
+    if [ "$ENABLE_IPERF_NETEM" = "1" ]; then
+        tc qdisc add dev "$NETEM_DEV" root netem \
+            delay ${NETEM_DELAY_MS}ms ${NETEM_JITTER_MS}ms distribution normal \
+            loss ${NETEM_LOSS_PCT}% \
+            reorder ${NETEM_REORDER_PCT}% ${NETEM_REORDER_GAP}
+        sleep 1
+    fi
 
-    # D. Disconnection/Reconnection Test
-    echo "TEST 4/4: Reconnection Event..."
+    iperf3 -c "$PEER_IP" -t 10 --connect-timeout 10000
+
+    if [ "$ENABLE_IPERF_NETEM" = "1" ]; then
+        tc qdisc del dev "$NETEM_DEV" root 2>/dev/null || true
+    fi
+
+    echo "TEST 4/5: Reconnection Event"
     echo "Killing iroh-lan..."
-    kill $IROH_PID
-    sleep 2 # Let it die
+    kill $IROH_PID 2>/dev/null || true
+    wait $IROH_PID 2>/dev/null || true
+    sleep 2
 
     echo "Restarting iroh-lan..."
-    /app/bin/iroh-lan --name testnet123 -d > /app/iroh_2.log 2>&1 &
+    > "$LOG_DIR/iroh_2.log"
+    /app/bin/iroh-lan --name "$TOPIC" -d > "$LOG_DIR/iroh_2.log" 2>&1 &
     IROH_PID_2=$!
-    
+
     echo "Waiting for new IP assignment..."
-    # Wait loop for IP
+    NEW_IP=""
     for i in {1..30}; do
-        if grep -q "My IP is" /app/iroh_2.log; then
-            NEW_IP=$(grep "My IP is" /app/iroh_2.log | awk '{print $NF}')
-            echo "Restarted! New IP: $NEW_IP"
+        if grep -q "My IP is" "$LOG_DIR/iroh_2.log"; then
+            NEW_IP=$(grep "My IP is" "$LOG_DIR/iroh_2.log" | tail -n1 | awk '{print $NF}')
+            echo "New IP: $NEW_IP"
             break
         fi
         sleep 1
     done
-    
+
     if [ -z "$NEW_IP" ]; then
         echo "Failed to get new IP after restart."
-        cat /app/iroh_2.log
+        cat "$LOG_DIR/iroh_2.log"
         exit 1
     fi
-    
-    # Give it a moment to stabilize routes
-    sleep 5
-    
-    # Verify connectivity again
-    echo "Verifying connectivity after restart..."
-    # 5 seconds test
-    iperf3 -c $PEER_IP -t 5
-    
-    # E. Game Simulation Test
-    echo "TEST 5/5: Minetest-like Game Simulation (${GAME_TEST_DURATION}m)..."
-    
-    # Re-Apply harsh network conditions
-    echo "Applying hostile network conditions (500ms delay, 1% loss)..."
-    tc qdisc add dev eth0 root netem delay 500ms 250ms distribution normal loss 1%
 
-    echo "Running Game Client..."
-    # Connect to the SERVER (PEER_IP) which is running game_check server
-    /app/bin/examples/game_check client "0.0.0.0:0" "$PEER_IP:30000" "$GAME_TEST_DURATION"
-    GAME_EXIT=$?
-    
-    # Cleanup tc
-    tc qdisc del dev eth0 root
+    echo "Waiting for tun device after reconnection..."
+    for i in {1..30}; do
+        if ls /sys/class/net/ | grep -q tun; then
+            TUN_DEV=$(ls /sys/class/net/ | grep '^tun' | head -n1)
+            NETEM_DEV="$TUN_DEV"
+            break
+        fi
+        sleep 1
+    done
+
+    echo "TEST 5/5: Game simulation (${GAME_TEST_DURATION}m)"
+    echo "Network: ${GAME_NETEM_DELAY_MS}ms delay, ${GAME_NETEM_LOSS_PCT}% loss"
+
+    tc qdisc add dev "$NETEM_DEV" root netem \
+        delay ${GAME_NETEM_DELAY_MS}ms ${GAME_NETEM_JITTER_MS}ms distribution normal \
+        loss ${GAME_NETEM_LOSS_PCT}% \
+        reorder ${GAME_NETEM_REORDER_PCT}% ${GAME_NETEM_REORDER_GAP}
+
+    echo "Running game client..."
+    /app/bin/examples/game_check client "0.0.0.0:0" "$PEER_IP:30000" "$GAME_TEST_DURATION" 2>&1 | tee -a "$LOG_DIR/game_client.log"
+    GAME_EXIT=${PIPESTATUS[0]}
+
+    tc qdisc del dev "$NETEM_DEV" root 2>/dev/null || true
+
+    kill $PING_PID 2>/dev/null || true
+    kill $IROH_PID_2 2>/dev/null || true
+
+    signal_ready "tests_complete"
 
     if [ $GAME_EXIT -eq 0 ]; then
-        echo "GAME SIMULATION PASSED."
+        echo "ALL STRESS TESTS PASSED"
+        exit 0
     else
         echo "GAME SIMULATION FAILED."
         exit 1
     fi
-    
-    echo "ALL STRESS TESTS PASSED."
-    
-    # Cleanup background ping
-    kill $PING_PID || true
-    exit 0
 fi

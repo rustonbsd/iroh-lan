@@ -1,4 +1,6 @@
-.PHONY: test build clean-test
+SHELL := /bin/bash
+
+.PHONY: build stress-test clean-test
 
 build:
 	cargo build
@@ -6,13 +8,17 @@ build:
 	cargo build --example tcp_server
 	cargo build --example game_check
 
-test: build
-	sudo docker compose -f docker_test/compose.yaml up --build --abort-on-container-exit
+long-stress-test: build
+	TOPIC="test_topic_$$RANDOM"; \
+	GAME_TEST_DURATION=530; \
+	echo "Using TOPIC=$$TOPIC"; \
+	sudo -E TOPIC=$$TOPIC docker compose -f docker_test/compose-stress.yaml up --build --abort-on-container-exit --remove-orphans
 
 stress-test: build
-	sudo docker compose -f docker_test/compose.yaml -f docker_test/compose-stress.yaml up --build --abort-on-container-exit
-test-fast:
-	sudo docker compose -f docker_test/compose.yaml up --abort-on-container-exit
+	TOPIC="test_topic_$$RANDOM"; \
+	GAME_TEST_DURATION=10; \
+	echo "Using TOPIC=$$TOPIC"; \
+	sudo -E TOPIC=$$TOPIC docker compose -f docker_test/compose-stress.yaml up --build --abort-on-container-exit --remove-orphans
 
 clean-test:
-	sudo docker compose -f docker_test/compose.yaml down -v
+	sudo docker compose -f docker_test/compose-stress.yaml down -v

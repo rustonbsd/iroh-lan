@@ -8,6 +8,6 @@ RUN apt-get update && apt-get install -y \
     iperf3 \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
-ENTRYPOINT ["/app/entrypoint.sh"]
+COPY entrypoint_stress.sh /app/entrypoint_stress.sh
+RUN chmod +x /app/entrypoint_stress.sh
+ENTRYPOINT ["/app/entrypoint_stress.sh"]

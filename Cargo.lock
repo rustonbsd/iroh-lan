@@ -979,8 +979,9 @@ dependencies = [
 
 [[package]]
 name = "dht"
-version = "6.1.0"
-source = "git+https://github.com/rustonbsd/mainline?rev=f781d30b36d7b7573f309ce5b88b72e7dbb15132#f781d30b36d7b7573f309ce5b88b72e7dbb15132"
+version = "6.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "487f44ddea90c749900048a2753a929fb88c391848ce12387f4a76e6ec911f72"
 dependencies = [
  "crc",
  "document-features",
@@ -2218,6 +2219,7 @@ version = "0.1.2"
 dependencies = [
  "actor-helper",
  "anyhow",
+ "bytes",
  "clap",
  "crossterm",
  "ed25519-dalek",
@@ -2389,7 +2391,7 @@ dependencies = [
 [[package]]
 name = "iroh-topic-tracker"
 version = "0.2.0"
-source = "git+https://github.com/rustonbsd/iroh-topic-tracker?branch=rewrite#70d9cb23f171f3bf8d99ebd500b29fd1281ab601"
+source = "git+https://github.com/rustonbsd/iroh-topic-tracker?rev=ff4535720b32bcc7ff1b887e303a01168ebaa457#ff4535720b32bcc7ff1b887e303a01168ebaa457"
 dependencies = [
  "actor-helper",
  "anyhow",
