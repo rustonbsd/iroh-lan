@@ -53,6 +53,10 @@ impl MyInfo {
                     Some(format!("acquiring {}...", ip_candidate.ip))
                 }
                 iroh_lan::RouterIp::AssignedIp(ipv4_addr) => Some(format!("{ipv4_addr}")),
+                iroh_lan::RouterIp::VerifyingIp(ipv4_addr, instant) => Some(format!(
+                    "verifying {ipv4_addr} ({}s)",
+                    instant.elapsed().as_secs()
+                )),
             },
         })
     }
@@ -110,6 +114,10 @@ async fn connection_state() -> Result<ConnectionState, String> {
                 "AquiringIp".to_string(),
             ),
             iroh_lan::RouterIp::AssignedIp(addr) => (Some(addr.to_string()), "AssignedIp".to_string()),
+            iroh_lan::RouterIp::VerifyingIp(addr, instant) => (
+                Some(format!("verifying {addr} ({}s)", instant.elapsed().as_secs())),
+                "VerifyingIp".to_string(),
+            ),
         };
 
         Ok(ConnectionState {

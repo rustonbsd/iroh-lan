@@ -96,6 +96,7 @@ export default function App() {
           lastRawState = state.raw_ip_state;
           if (state.raw_ip_state === "NoIp") pushMessage("No IP yet");
           if (state.raw_ip_state === "AquiringIp") pushMessage("Acquiring IP…");
+          if (state.raw_ip_state === "VerifyingIp") pushMessage("Verifying IP…");
           if (state.raw_ip_state === "AssignedIp") pushMessage("Acquired IP");
         }
         if (state.ip && state.raw_ip_state === "AssignedIp") {
