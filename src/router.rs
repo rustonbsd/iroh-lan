@@ -280,7 +280,7 @@ impl Actor<anyhow::Error> for RouterActor {
         let mut ip_tick = tokio::time::interval(Duration::from_millis(500));
         ip_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        let cleanup_interval_secs = 60 + rand::rng().random_range(0..30);
+        let cleanup_interval_secs = 5 + rand::rng().random_range(0..10);
         let mut cleanup_tick = tokio::time::interval(Duration::from_secs(cleanup_interval_secs));
         cleanup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -674,8 +674,8 @@ impl RouterActor {
                             );
                             Ok(false)
                         } else {
-                            // Refresh if needed (every 60s)
-                            if current_time() - ip_assignment.last_updated > 60 {
+                            // Refresh if needed (every 30s)
+                            if current_time() - ip_assignment.last_updated > 30 {
                                 info!("Refreshing IP assignment for {}", my_ip);
                                 if let Err(e) =
                                     self.write_ip_assignment(my_ip, self.endpoint_id).await
@@ -736,9 +736,8 @@ impl RouterActor {
         let now = current_time();
 
         // Cleanup assignments
-        let assignments = self.read_all_ip_assignments().await?;
-        for a in assignments {
-            if now.saturating_sub(a.last_updated) > 120 {
+        for a in self.read_all_ip_assignments().await? {
+            if now.saturating_sub(a.last_updated) > 60 {
                 info!(
                     "Removing stale IP assignment for {} (last updated {}s ago)",
                     a.ip,
@@ -751,8 +750,7 @@ impl RouterActor {
         }
 
         // Cleanup candidates
-        let candidates = self.read_all_ip_candidates().await?;
-        for c in candidates {
+        for c in self.read_all_ip_candidates().await? {
             if now.saturating_sub(c.last_updated) > 30 {
                 info!(
                     "Removing stale IP candidate for {} (last updated {}s ago)",

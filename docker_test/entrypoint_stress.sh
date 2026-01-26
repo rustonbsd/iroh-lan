@@ -91,7 +91,7 @@ fi
 rm -f "$COORD_DIR"/* 2>/dev/null || true
 
 > "$LOG_DIR/iroh.log"
-/app/bin/iroh-lan --name "$TOPIC" -d > "$LOG_DIR/iroh.log" 2>&1 &
+/app/bin/iroh-lan "$TOPIC" -t > "$LOG_DIR/iroh.log" 2>&1 &
 IROH_PID=$!
 
 echo "Waiting for IP assignment (AssignedIp)..."
@@ -221,7 +221,7 @@ elif [ "$ROLE" == "client" ]; then
 
     echo "Restarting iroh-lan..."
     > "$LOG_DIR/iroh_2.log"
-    /app/bin/iroh-lan --name "$TOPIC" -d > "$LOG_DIR/iroh_2.log" 2>&1 &
+    /app/bin/iroh-lan "$TOPIC" -t > "$LOG_DIR/iroh_2.log" 2>&1 &
     IROH_PID_2=$!
 
     echo "Waiting for new IP assignment..."

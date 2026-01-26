@@ -15,23 +15,27 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
-use std::{io, net::Ipv4Addr, time::Duration};
+use std::{collections::HashSet, io, net::Ipv4Addr, time::Duration};
 use tokio::time::sleep;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Name of the network
-    #[arg(short, long, default_value = "test1")]
+    #[arg(value_name = "NAME")]
     name: String,
 
     /// Password for the network
-    #[arg(short, long, default_value = "password")]
+    #[arg(short, long, default_value = "")]
     password: String,
 
-    /// Disable the TUI and run in headless mode (logs only)
-    #[arg(short = 'd', long = "no-display")]
+    /// Disable the TUI and run in headless mode
+    #[arg(short = 'n', long = "no-display")]
     no_display: bool,
+
+    /// Run headless with full tracing output
+    #[arg(short = 't', long = "trace")]
+    trace: bool,
 }
 
 #[tokio::main]
@@ -43,16 +47,17 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    if args.no_display {
+    if args.trace {
         use tracing_subscriber::{EnvFilter, fmt, prelude::*};
         tracing_subscriber::registry()
             .with(fmt::layer().with_thread_ids(true))
-            .with(
-                EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| EnvFilter::new("iroh_lan=trace,info")),
-            )
+            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("trace")))
             .init();
+    }
 
+    let headless = args.no_display || args.trace;
+
+    if headless {
         run_headless(args.name, args.password).await?;
     } else {
         run_tui(args.name, args.password).await?;
@@ -62,9 +67,9 @@ async fn main() -> Result<()> {
 }
 
 async fn run_headless(name: String, password: String) -> Result<()> {
+    println!("Waiting for first peer connection...");
     let network = Network::new(&name, &password).await?;
-
-    println!("Starting network '{}'...", name);
+    println!("Waiting for IP assignment...");
 
     loop {
         let state = network.get_router_state().await?;
@@ -75,8 +80,41 @@ async fn run_headless(name: String, password: String) -> Result<()> {
         sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    // Keep running
-    tokio::signal::ctrl_c().await?;
+    let mut known_peers: HashSet<EndpointId> = HashSet::new();
+    let mut lost_peers: HashSet<EndpointId> = HashSet::new();
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            _ = sleep(std::time::Duration::from_millis(250)) => {
+                if let Ok(peers) = network.get_peers().await {
+                    let new_peers: Vec<_> = peers
+                        .iter()
+                        .filter(|(id, ip)| ip.is_some() && !known_peers.contains(id))
+                        .collect();
+                    for (id, ip) in new_peers {
+                        known_peers.insert(*id);
+                        if lost_peers.contains(id) {
+                            lost_peers.remove(id);
+                        }
+                        println!("Peer connected: {} ({})", ip.unwrap_or(Ipv4Addr::UNSPECIFIED), id);
+                    }
+                    let newly_lost_peers: Vec<_> = known_peers
+                        .iter()
+                        .filter(|id| !peers.iter().any(|(pid, _)| pid == *id))
+                        .cloned()
+                        .collect();
+                    for id in newly_lost_peers {
+                        lost_peers.insert(id);
+                        if known_peers.contains(&id) {
+                            known_peers.remove(&id);
+                        }
+                        println!("Peer disconnected: {}", id);
+                    }
+                }
+            }
+        }
+    }
 
     Ok(())
 }
