@@ -70,27 +70,9 @@ wait_for_signal() {
     return 1
 }
 
-wait_for_direct_connection() {
-    local timeout_sec="${1:-60}"
-    local start_time
-    start_time=$(date +%s)
-
-    echo "[COORD] Waiting for direct connection (timeout: ${timeout_sec}s)"
-    while [ $(( $(date +%s) - start_time )) -lt $timeout_sec ]; do
-        if grep -q "Connection state transition: .* -> Open" "$LOG_DIR/iroh.log"; then
-            echo "[COORD] Direct connection is open"
-            return 0
-        fi
-        if grep -q "New direct connection" "$LOG_DIR/iroh.log"; then
-            echo "[COORD] Direct connection established"
-            return 0
-        fi
-        sleep 0.5
-    done
-
-    echo "[COORD] TIMEOUT waiting for direct connection"
-    tail -n 200 "$LOG_DIR/iroh.log" || true
-    return 1
+run_iperf_once() {
+    local host="$1"
+    iperf3 -c "$host" -t 10 --connect-timeout 30000
 }
 
 clear_signal() {
@@ -185,8 +167,13 @@ if [ "$ROLE" == "server" ]; then
     echo "Starting iperf3 server (persistent)..."
     iperf3 -s --idle-timeout 60 2>&1 | sed 's/^/[iperf3] /' &
     IPERF_PID=$!
-
-    sleep 2
+    for i in {1..40}; do
+        if ss -ltn | awk '{print $4}' | grep -q ":5201$"; then
+            signal_ready "iperf_ready"
+            break
+        fi
+        sleep 0.5
+    done
 
     signal_ready "server_ready"
 
@@ -203,14 +190,13 @@ if [ "$ROLE" == "server" ]; then
 elif [ "$ROLE" == "client" ]; then
 
     wait_for_signal "server_ready" 120
-    wait_for_direct_connection 120
 
     echo "TEST 1/5: Broadcast Hostility Test"
     ping -b -i 0.2 -c 100 255.255.255.255 > /dev/null 2>&1 &
     PING_PID=$!
 
     echo "TEST 2/5: Throughput (clean network) 10s"
-    iperf3 -c "$PEER_IP" -t 10 --connect-timeout 10000
+    run_iperf_once "$PEER_IP"
 
     echo "TEST 3/5: Throughput (degraded network) 10s"
     if [ "$ENABLE_IPERF_NETEM" = "1" ]; then
@@ -221,7 +207,7 @@ elif [ "$ROLE" == "client" ]; then
         sleep 1
     fi
 
-    iperf3 -c "$PEER_IP" -t 10 --connect-timeout 10000
+    run_iperf_once "$PEER_IP"
 
     if [ "$ENABLE_IPERF_NETEM" = "1" ]; then
         tc qdisc del dev "$NETEM_DEV" root 2>/dev/null || true

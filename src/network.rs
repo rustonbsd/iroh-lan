@@ -93,6 +93,8 @@ impl Network {
             .build()
             .await?;
 
+        direct.set_router(router.clone()).await?;
+
         let (api, rx) = Handle::channel();
         tokio::spawn(async move {
             let (to_remote_writer, to_remote_reader) = tokio::sync::mpsc::channel(1024 * 16);

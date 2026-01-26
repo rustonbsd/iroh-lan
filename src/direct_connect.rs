@@ -1,4 +1,4 @@
-use actor_helper::{Action, Handle, act};
+use actor_helper::{Action, Handle, act, act_ok};
 use anyhow::Result;
 use iroh::{
     EndpointId,
@@ -13,7 +13,7 @@ use std::{
 use tokio::time::timeout;
 use tracing::{debug, error, info, trace};
 
-use crate::{auth, connection::Conn, local_networking::Ipv4Pkg};
+use crate::{auth, connection::Conn, local_networking::Ipv4Pkg, Router, RouterIp};
 
 #[derive(Debug, Clone)]
 pub struct Direct {
@@ -27,6 +27,7 @@ struct DirectActor {
     endpoint: iroh::endpoint::Endpoint,
     rx: actor_helper::Receiver<Action<DirectActor>>,
     direct_connect_tx: tokio::sync::mpsc::Sender<DirectMessage>,
+    router: Option<Router>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -49,6 +50,7 @@ impl Direct {
             rx,
             direct_connect_tx,
             network_secret: *network_secret,
+            router: None,
         };
         tokio::spawn(async move { actor.run().await });
         Self { api }
@@ -70,6 +72,10 @@ impl Direct {
         self.api
             .call(act!(actor => actor.ensure_connection(to)))
             .await
+    }
+
+    pub async fn set_router(&self, router: Router) -> Result<()> {
+        self.api.call(act_ok!(actor => async move { actor.set_router(router) })).await
     }
 
     pub async fn get_endpoint(&self) -> iroh::endpoint::Endpoint {
@@ -132,6 +138,32 @@ impl DirectActor {
     async fn handle_connection(&mut self, conn: iroh::endpoint::Connection) -> Result<()> {
         info!("New direct connection from {:?}", conn.remote_id());
         let remote_id = conn.remote_id();
+        if let Some(router) = &self.router {
+            match router.get_ip_state().await {
+                Ok(RouterIp::AssignedIp(_)) => {}
+                _ => {
+                    info!(
+                        "Rejecting connection from {}: local IP not assigned",
+                        remote_id
+                    );
+                    conn.close(VarInt::from_u32(425), b"local ip not assigned");
+                    return Ok(());
+                }
+            }
+
+            if router.get_ip_from_endpoint_id(remote_id).await.is_err() {
+                info!(
+                    "Rejecting connection from {}: remote IP not assigned",
+                    remote_id
+                );
+                conn.close(VarInt::from_u32(426), b"remote ip not assigned");
+                return Ok(());
+            }
+        } else {
+            info!("Rejecting connection from {}: router not ready", remote_id);
+            conn.close(VarInt::from_u32(424), b"router not ready");
+            return Ok(());
+        }
         let prefer_incoming = self.endpoint.id() > remote_id;
 
         match self.peers.entry(remote_id) {
@@ -226,6 +258,29 @@ impl DirectActor {
             }
             Entry::Vacant(entry) => {
                 info!("No active connection to {}, initiating new connection", to);
+                if let Some(router) = &self.router {
+                    match router.get_ip_state().await {
+                        Ok(RouterIp::AssignedIp(_)) => {}
+                        _ => {
+                            info!(
+                                "Skipping connect to {}: local IP not assigned",
+                                to
+                            );
+                            return Ok(());
+                        }
+                    }
+
+                    if router.get_ip_from_endpoint_id(to).await.is_err() {
+                        info!(
+                            "Skipping connect to {}: remote IP not assigned",
+                            to
+                        );
+                        return Ok(());
+                    }
+                } else {
+                    info!("Skipping connect to {}: router not ready", to);
+                    return Ok(());
+                }
                 let conn = Conn::connect(
                     self.endpoint.clone(),
                     to,
@@ -247,6 +302,30 @@ impl DirectActor {
 
     async fn ensure_connection(&mut self, to: EndpointId) -> Result<()> {
         if self.peers.contains_key(&to) {
+            return Ok(());
+        }
+
+        if let Some(router) = &self.router {
+            match router.get_ip_state().await {
+                Ok(RouterIp::AssignedIp(_)) => {}
+                _ => {
+                    info!(
+                        "Skipping ensure_connection to {}: local IP not assigned",
+                        to
+                    );
+                    return Ok(());
+                }
+            }
+
+            if router.get_ip_from_endpoint_id(to).await.is_err() {
+                info!(
+                    "Skipping ensure_connection to {}: remote IP not assigned",
+                    to
+                );
+                return Ok(());
+            }
+        } else {
+            info!("Skipping ensure_connection to {}: router not ready", to);
             return Ok(());
         }
 
@@ -277,6 +356,10 @@ impl DirectActor {
 
     pub async fn get_endpoint(&self) -> Result<iroh::endpoint::Endpoint> {
         Ok(self.endpoint.clone())
+    }
+
+    fn set_router(&mut self, router: Router) {
+        self.router = Some(router);
     }
 
     pub async fn close(&mut self) -> Result<()> {

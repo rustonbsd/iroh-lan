@@ -23,6 +23,8 @@ services:
       - ./results_stress/server:/app/results
       - ../target/debug:/app/bin
       - coord:/coord
+    networks:
+      testnet:
   node1:
     image: iroh-lan-test
     cap_add:
@@ -40,6 +42,15 @@ services:
       - ./results_stress/client:/app/results
       - ../target/debug:/app/bin
       - coord:/coord
+    networks:
+      testnet:
 
 volumes:
   coord:
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.50.0.0/16
