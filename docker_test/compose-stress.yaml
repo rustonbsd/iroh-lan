@@ -16,6 +16,7 @@ services:
       retries: 60
     entrypoint: ["/app/entrypoint_stress.sh", "server"]
     environment:
+      - GAME_TEST_DURATION=${GAME_TEST_DURATION:-1}
       - TOPIC=${TOPIC}
       - STRESS_VERBOSE=1
       - RUST_LOG=${RUST_LOG:-iroh_lan=trace,iroh=info,iroh_gossip=info}
