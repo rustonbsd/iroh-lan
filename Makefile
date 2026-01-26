@@ -16,7 +16,6 @@ long-stress-test: build
 
 stress-test: build
 	TOPIC="test_topic_$$RANDOM"; \
-	GAME_TEST_DURATION=10; \
 	echo "Using TOPIC=$$TOPIC"; \
 	sudo -E TOPIC=$$TOPIC docker compose -f docker_test/compose-stress.yaml up --build --abort-on-container-exit --remove-orphans
 
