@@ -1,4 +1,4 @@
-use iroh_lan::network::Network;
+use iroh_lan::Network;
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use tokio::sync::Mutex;

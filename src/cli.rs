@@ -6,7 +6,6 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use iroh::EndpointId;
-use iroh_lan::{RouterIp, network::Network};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -17,6 +16,8 @@ use ratatui::{
 };
 use std::{collections::HashSet, io, net::Ipv4Addr, time::Duration};
 use tokio::time::sleep;
+
+use crate::{RouterIp, Network};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -38,9 +39,12 @@ struct Args {
     trace: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+pub async fn run_cli() -> Result<()> {
     let args = Args::parse();
+
+    if args.name.is_empty() {
+        anyhow::bail!("Network name is required")
+    }
 
     if !self_runas::is_elevated() {
         self_runas::admin()?;

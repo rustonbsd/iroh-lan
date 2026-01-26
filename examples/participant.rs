@@ -1,4 +1,4 @@
-use iroh_lan::{RouterIp, network::Network};
+use iroh_lan::{RouterIp, Network};
 use tokio::time::sleep;
 
 #[tokio::main]
