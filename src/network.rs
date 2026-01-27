@@ -1,6 +1,6 @@
 use std::{
-    collections::{HashMap, HashSet},
-    time::Duration,
+    collections::{HashMap, HashSet, VecDeque},
+    time::{Duration, Instant},
 };
 
 use actor_helper::{Action, Actor, Handle, act, act_ok};
@@ -13,6 +13,9 @@ use sha2::Digest;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{Direct, DirectMessage, Router, Tun, local_networking::Ipv4Pkg, router::RouterIp};
+
+const PENDING_TTL: Duration = Duration::from_secs(60);
+const PENDING_MAX_PER_IP: usize = 1024*16;
 
 #[derive(Debug, Clone)]
 pub struct Network {
@@ -39,6 +42,7 @@ struct NetworkActor {
 
     ip_cache: HashMap<std::net::Ipv4Addr, EndpointId>,
     peer_ids: HashSet<EndpointId>,
+    pending_packets: HashMap<std::net::Ipv4Addr, VecDeque<(Instant, Ipv4Pkg)>>,
 }
 
 impl Network {
@@ -114,6 +118,7 @@ impl Network {
 
                 ip_cache: HashMap::new(),
                 peer_ids: HashSet::new(),
+                pending_packets: HashMap::new(),
             };
             let _ = actor.run().await;
         });
@@ -234,6 +239,34 @@ impl Actor<anyhow::Error> for NetworkActor {
                                 self.ip_cache.insert(ip, id);
                             }
                         }
+                        if !self.pending_packets.is_empty() {
+                            let now = Instant::now();
+                            let pending_keys: Vec<_> = self.pending_packets.keys().copied().collect();
+                            for ip in pending_keys {
+                                if let Some(queue) = self.pending_packets.get_mut(&ip) {
+                                    queue.retain(|(ts, _)| now.duration_since(*ts) <= PENDING_TTL);
+                                    if queue.is_empty() {
+                                        self.pending_packets.remove(&ip);
+                                        continue;
+                                    }
+                                }
+                                if let Some((id, mut queue)) = self
+                                    .ip_cache
+                                    .get(&ip)
+                                    .copied()
+                                    .zip(self.pending_packets.remove(&ip))
+                                {
+                                    while let Some((_, pkt)) = queue.pop_front() {
+                                        let direct = self.direct.clone();
+                                        tokio::spawn(async move {
+                                            if let Err(e) = direct.route_packet(id, DirectMessage::IpPacket(pkt)).await {
+                                                warn!("Failed to route buffered packet to {}: {}", id, e);
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                        }
                         for id in next_peer_ids.difference(&self.peer_ids).copied() {
                             info!("New peer discovered: {}. Ensuring direct connection", id);
                             let direct = self.direct.clone();
@@ -267,6 +300,11 @@ impl Actor<anyhow::Error> for NetworkActor {
                                     }
                                     Err(e) => {
                                         trace!("Could not resolve endpoint for IP {}: {}", dest, e);
+                                        let queue = self.pending_packets.entry(dest).or_default();
+                                        if queue.len() >= PENDING_MAX_PER_IP {
+                                            queue.pop_front();
+                                        }
+                                        queue.push_back((Instant::now(), tun_recv));
                                     }
                                 }
                             }

@@ -13,7 +13,7 @@ use std::{
 use tokio::time::timeout;
 use tracing::{debug, error, info, trace};
 
-use crate::{auth, connection::Conn, local_networking::Ipv4Pkg, Router, RouterIp};
+use crate::{Router, RouterIp, auth, connection::Conn, local_networking::Ipv4Pkg};
 
 #[derive(Debug, Clone)]
 pub struct Direct {
@@ -22,6 +22,7 @@ pub struct Direct {
 
 #[derive(Debug)]
 struct DirectActor {
+    self_handle: Handle<DirectActor, anyhow::Error>,
     network_secret: [u8; 64],
     peers: HashMap<EndpointId, Conn>,
     endpoint: iroh::endpoint::Endpoint,
@@ -45,6 +46,7 @@ impl Direct {
     ) -> Self {
         let (api, rx) = Handle::channel();
         let mut actor = DirectActor {
+            self_handle: api.clone(),
             peers: HashMap::new(),
             endpoint,
             rx,
@@ -75,7 +77,9 @@ impl Direct {
     }
 
     pub async fn set_router(&self, router: Router) -> Result<()> {
-        self.api.call(act_ok!(actor => async move { actor.set_router(router) })).await
+        self.api
+            .call(act_ok!(actor => async move { actor.set_router(router) }))
+            .await
     }
 
     pub async fn get_endpoint(&self) -> iroh::endpoint::Endpoint {
@@ -153,8 +157,62 @@ impl DirectActor {
                 );
             }
         } else {
-            info!("Accepting connection from {} before router ready", remote_id);
+            info!(
+                "Accepting connection from {} before router ready",
+                remote_id
+            );
         }
+        let prefer_incoming = self.endpoint.id() > remote_id;
+
+        if let Some(conn_ref) = self.peers.get(&remote_id) {
+            let state = conn_ref.get_state().await;
+            if state == crate::connection::ConnState::Open && !prefer_incoming {
+                info!(
+                    "Ignoring incoming connection from {} (keeping existing connection)",
+                    remote_id
+                );
+                conn.close(VarInt::from_u32(409), b"duplicate connection");
+                return Ok(());
+            }
+        }
+
+        let network_secret = self.network_secret;
+        let my_id = self.endpoint.id();
+        let api = self.self_handle.clone();
+
+        tokio::spawn(async move {
+            let accept_result = timeout(
+                Duration::from_secs(60),
+                auth::accept(&conn, &network_secret, my_id, remote_id),
+            )
+            .await;
+
+            match accept_result {
+                Ok(Ok((ctrl_send, ctrl_recv, data_send, data_recv))) => {
+                    let _ = api.call(act!(actor => actor.finalize_connection(conn, ctrl_send, ctrl_recv, data_send, data_recv))).await;
+                }
+                Ok(Err(e)) => {
+                    error!("Auth accept failed from {}: {}", remote_id, e);
+                }
+                Err(_) => {
+                    error!("Auth accept timed out from {}", remote_id);
+                    conn.close(VarInt::from_u32(408), b"accept timeout");
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn finalize_connection(
+        &mut self,
+        conn: iroh::endpoint::Connection,
+        ctrl_send: iroh::endpoint::SendStream,
+        ctrl_recv: iroh::endpoint::RecvStream,
+        data_send: iroh::endpoint::SendStream,
+        data_recv: iroh::endpoint::RecvStream,
+    ) -> Result<()> {
+        let remote_id = conn.remote_id();
         let prefer_incoming = self.endpoint.id() > remote_id;
 
         match self.peers.entry(remote_id) {
@@ -171,30 +229,17 @@ impl DirectActor {
                         "Existing connection found for {}, upgrading/resetting",
                         remote_id
                     );
-                    let accept_result = timeout(
-                        Duration::from_secs(60),
-                        auth::accept(&conn, &self.network_secret, self.endpoint.id(), remote_id),
-                    )
-                    .await;
-                    let (ctrl_send, ctrl_recv, data_send, data_recv) = match accept_result {
-                        Ok(Ok(streams)) => streams,
-                        Ok(Err(e)) => {
-                            error!("Auth accept failed from {}: {}", remote_id, e);
-                            return Err(e);
-                        }
-                        Err(_) => {
-                            error!("Auth accept timed out from {} [Occupied]", remote_id);
-                            conn.close(VarInt::from_u32(408), b"accept timeout");
-                            return Err(anyhow::anyhow!("auth accept timed out"));
-                        }
-                    };
-                    entry
+
+                    if let Err(e) = entry
                         .get_mut()
                         .incoming_connection(conn, ctrl_send, ctrl_recv, data_send, data_recv)
-                        .await?;
+                        .await
+                    {
+                        error!("Failed to upgrade connection to {}: {}", remote_id, e);
+                    }
                 } else {
                     info!(
-                        "Ignoring incoming connection from {} (keeping existing connection)",
+                        "Ignoring incoming connection from {} (keeping existing connection) - Race detected",
                         remote_id
                     );
                     conn.close(VarInt::from_u32(409), b"duplicate connection");
@@ -202,39 +247,27 @@ impl DirectActor {
             }
             Entry::Vacant(entry) => {
                 debug!("New connection entry for {}", remote_id);
-                let accept_result = timeout(
-                    Duration::from_secs(60),
-                    auth::accept(&conn, &self.network_secret, self.endpoint.id(), remote_id),
+                match Conn::new(
+                    self.endpoint.clone(),
+                    conn,
+                    ctrl_send,
+                    ctrl_recv,
+                    data_send,
+                    data_recv,
+                    self.direct_connect_tx.clone(),
+                    &self.network_secret,
                 )
-                .await;
-                let (ctrl_send, ctrl_recv, data_send, data_recv) = match accept_result {
-                    Ok(Ok(streams)) => streams,
-                    Ok(Err(e)) => {
-                        error!("Auth accept failed from {}: {}", remote_id, e);
-                        return Err(e);
+                .await
+                {
+                    Ok(new_conn) => {
+                        entry.insert(new_conn);
                     }
-                    Err(_) => {
-                        error!("Auth accept timed out from {} [Vacant]", remote_id);
-                        conn.close(VarInt::from_u32(408), b"accept timeout");
-                        return Err(anyhow::anyhow!("auth accept timed out"));
+                    Err(e) => {
+                        error!("Failed to create new Conn actor for {}: {}", remote_id, e);
                     }
-                };
-                entry.insert(
-                    Conn::new(
-                        self.endpoint.clone(),
-                        conn,
-                        ctrl_send,
-                        ctrl_recv,
-                        data_send,
-                        data_recv,
-                        self.direct_connect_tx.clone(),
-                        &self.network_secret,
-                    )
-                    .await?,
-                );
+                }
             }
         }
-
         Ok(())
     }
 
@@ -253,19 +286,13 @@ impl DirectActor {
                     match router.get_ip_state().await {
                         Ok(RouterIp::AssignedIp(_)) => {}
                         _ => {
-                            info!(
-                                "Skipping connect to {}: local IP not assigned",
-                                to
-                            );
+                            info!("Skipping connect to {}: local IP not assigned", to);
                             return Ok(());
                         }
                     }
 
                     if router.get_ip_from_endpoint_id(to).await.is_err() {
-                        info!(
-                            "Skipping connect to {}: remote IP not assigned",
-                            to
-                        );
+                        info!("Skipping connect to {}: remote IP not assigned", to);
                         return Ok(());
                     }
                 } else {
