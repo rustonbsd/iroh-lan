@@ -18,8 +18,10 @@ const MAX_RECONNECTS: usize = 100;
 const RECONNECT_BACKOFF_BASE: Duration = Duration::from_millis(200);
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(3);
 const BACKPRESSURE_WARN_MS: u128 = 5;
-const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_SENDER_QUEUE: usize = 50_000;
+const WRITE_CHANNEL_CAP: usize = 8_192;
+const MAX_CONSECUTIVE_WRITE_ERRORS: u64 = 3;
 const STATS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const QUEUE_WARN_LEN: usize = 10_000;
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
@@ -61,11 +63,11 @@ struct ConnActor {
 
     ctrl_read_task: Option<tokio::task::JoinHandle<()>>,
     ctrl_write_task: Option<tokio::task::JoinHandle<()>>,
-    ctrl_write_tx: Option<tokio::sync::mpsc::UnboundedSender<DirectMessage>>,
+    ctrl_write_tx: Option<tokio::sync::mpsc::Sender<DirectMessage>>,
 
     data_read_task: Option<tokio::task::JoinHandle<()>>,
     data_write_task: Option<tokio::task::JoinHandle<()>>,
-    data_write_tx: Option<tokio::sync::mpsc::UnboundedSender<DirectMessage>>,
+    data_write_tx: Option<tokio::sync::mpsc::Sender<DirectMessage>>,
 
     ctrl_queue_len: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     data_queue_len: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -76,6 +78,9 @@ struct ConnActor {
     rx_count: u64,
     tx_count: u64,
     write_timeouts: u64,
+    consecutive_write_errors: u64,
+    dropped_ctrl: u64,
+    dropped_data: u64,
 }
 
 impl Conn {
@@ -254,16 +259,25 @@ impl Actor<anyhow::Error> for ConnActor {
                 }
                 _ = keepalive_ticker.tick(), if self.state == ConnState::Open => {
                     if let Some(tx) = &self.ctrl_write_tx {
-                        let new_len = self.ctrl_queue_len.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                        if new_len > QUEUE_WARN_LEN {
-                            warn!("Stream queue length high (keepalive): {}", new_len);
+                        match tx.try_send(DirectMessage::IDontLikeWarnings) {
+                            Ok(_) => {
+                                let new_len = self.ctrl_queue_len.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                                if new_len > QUEUE_WARN_LEN {
+                                    warn!("Stream queue length high (keepalive): {}", new_len);
+                                }
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                self.dropped_ctrl = self.dropped_ctrl.saturating_add(1);
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                self.dropped_ctrl = self.dropped_ctrl.saturating_add(1);
+                            }
                         }
-                        let _ = tx.send(DirectMessage::IDontLikeWarnings);
                     }
                 }
                 _ = stats_ticker.tick() => {
                     debug!(
-                        "Conn stats: state={:?} last_rx={:?} last_tx={:?} rx_count={} tx_count={} ctrl_q={} data_q={} write_timeouts={}",
+                        "Conn stats: state={:?} last_rx={:?} last_tx={:?} rx_count={} tx_count={} ctrl_q={} data_q={} write_timeouts={} write_errors={} dropped_ctrl={} dropped_data={}",
                         self.state,
                         self.last_rx.elapsed(),
                         self.last_tx.elapsed(),
@@ -271,7 +285,10 @@ impl Actor<anyhow::Error> for ConnActor {
                         self.tx_count,
                         self.ctrl_queue_len.load(std::sync::atomic::Ordering::Relaxed),
                         self.data_queue_len.load(std::sync::atomic::Ordering::Relaxed),
-                        self.write_timeouts
+                        self.write_timeouts,
+                        self.consecutive_write_errors,
+                        self.dropped_ctrl,
+                        self.dropped_data
                     );
                 }
                 _ = tokio::signal::ctrl_c() => {
@@ -316,8 +333,8 @@ impl ConnActor {
         let ctrl_queue_len = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         if let Some(send) = ctrl_send_stream {
             info!("Spawning control write task immediately in new");
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            let task = tokio::spawn(write_loop_unbounded(
+            let (tx, rx) = tokio::sync::mpsc::channel(WRITE_CHANNEL_CAP);
+            let task = tokio::spawn(write_loop_bounded(
                 send,
                 rx,
                 self_handle.clone(),
@@ -344,8 +361,8 @@ impl ConnActor {
         let data_queue_len = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         if let Some(send) = data_send_stream {
             info!("Spawning data write task immediately in new");
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            let task = tokio::spawn(write_loop_unbounded(
+            let (tx, rx) = tokio::sync::mpsc::channel(WRITE_CHANNEL_CAP);
+            let task = tokio::spawn(write_loop_bounded(
                 send,
                 rx,
                 self_handle.clone(),
@@ -391,6 +408,9 @@ impl ConnActor {
             rx_count: 0,
             tx_count: 0,
             write_timeouts: 0,
+            consecutive_write_errors: 0,
+            dropped_ctrl: 0,
+            dropped_data: 0,
         }
     }
 
@@ -428,7 +448,11 @@ impl ConnActor {
     }
 
     pub async fn handle_write_error(&mut self) {
-        warn!("Write loop failed. Marking as disconnected.");
+        self.consecutive_write_errors = self.consecutive_write_errors.saturating_add(1);
+        warn!(
+            "Write loop failed. consecutive_write_errors={}",
+            self.consecutive_write_errors
+        );
         self.ctrl_write_tx = None;
         self.data_write_tx = None;
         if let Some(task) = self.ctrl_write_task.take() {
@@ -437,7 +461,9 @@ impl ConnActor {
         if let Some(task) = self.data_write_task.take() {
             task.abort();
         }
-        self.set_state(ConnState::Disconnected);
+        if self.consecutive_write_errors >= MAX_CONSECUTIVE_WRITE_ERRORS {
+            self.set_state(ConnState::Disconnected);
+        }
     }
 
     pub async fn write(&mut self, pkg: DirectMessage) {
@@ -460,21 +486,36 @@ impl ConnActor {
 
         if let Some(tx) = target_tx {
             trace!("Sending packet to write task");
-            let new_len = if use_data_stream {
-                self.data_queue_len
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    + 1
-            } else {
-                self.ctrl_queue_len
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    + 1
-            };
-            if new_len > QUEUE_WARN_LEN {
-                warn!("Stream queue length high: {}", new_len);
-            }
-            match tx.send(pkg.clone()) {
-                Ok(_) => {}
-                Err(tokio::sync::mpsc::error::SendError(val)) => {
+            match tx.try_send(pkg.clone()) {
+                Ok(_) => {
+                    let new_len = if use_data_stream {
+                        self.data_queue_len
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            + 1
+                    } else {
+                        self.ctrl_queue_len
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            + 1
+                    };
+                    if new_len > QUEUE_WARN_LEN {
+                        warn!("Stream queue length high: {}", new_len);
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    if use_data_stream {
+                        self.dropped_data = self.dropped_data.saturating_add(1);
+                    } else {
+                        self.dropped_ctrl = self.dropped_ctrl.saturating_add(1);
+                    }
+                    if (self.dropped_data + self.dropped_ctrl).is_multiple_of(1000) {
+                        warn!(
+                            "Write queue full, dropping packet (ctrl_dropped={}, data_dropped={})",
+                            self.dropped_ctrl,
+                            self.dropped_data
+                        );
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(val)) => {
                     warn!("Write task channel closed, buffering packet.");
                     self.sender_queue.push_front(val);
                     while self.sender_queue.len() > MAX_SENDER_QUEUE {
@@ -505,6 +546,7 @@ impl ConnActor {
     fn note_tx(&mut self) {
         self.last_tx = Instant::now();
         self.tx_count = self.tx_count.saturating_add(1);
+        self.consecutive_write_errors = 0;
     }
 
     fn inc_write_timeout(&mut self) {
@@ -542,10 +584,10 @@ impl ConnActor {
         }
 
         info!("Spawning control write task for incoming connection");
-        let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel(WRITE_CHANNEL_CAP);
         self.ctrl_queue_len
             .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.ctrl_write_task = Some(tokio::spawn(write_loop_unbounded(
+        self.ctrl_write_task = Some(tokio::spawn(write_loop_bounded(
             ctrl_send_stream,
             ctrl_rx,
             self.self_handle.clone(),
@@ -570,10 +612,10 @@ impl ConnActor {
         }
 
         info!("Spawning data write task for incoming connection");
-        let (data_tx, data_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (data_tx, data_rx) = tokio::sync::mpsc::channel(WRITE_CHANNEL_CAP);
         self.data_queue_len
             .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.data_write_task = Some(tokio::spawn(write_loop_unbounded(
+        self.data_write_task = Some(tokio::spawn(write_loop_bounded(
             data_send_stream,
             data_rx,
             self.self_handle.clone(),
@@ -585,9 +627,23 @@ impl ConnActor {
         self.conn = Some(conn);
         self.set_state(ConnState::Open);
         self.reconnect_backoff = RECONNECT_BACKOFF_BASE;
+        self.consecutive_write_errors = 0;
 
         while let Some(msg) = self.sender_queue.pop_back() {
-            let _ = ctrl_tx.send(msg);
+            match ctrl_tx.try_send(msg) {
+                Ok(_) => {
+                    let new_len = self.ctrl_queue_len.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if new_len > QUEUE_WARN_LEN {
+                        warn!("Stream queue length high (flush): {}", new_len);
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    self.dropped_ctrl = self.dropped_ctrl.saturating_add(1);
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    self.dropped_ctrl = self.dropped_ctrl.saturating_add(1);
+                }
+            }
         }
 
         Ok(())
@@ -667,9 +723,9 @@ impl ConnActor {
     }
 }
 
-async fn write_loop_unbounded(
+async fn write_loop_bounded(
     mut stream: SendStream,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<DirectMessage>,
+    mut rx: tokio::sync::mpsc::Receiver<DirectMessage>,
     api: Handle<ConnActor, anyhow::Error>,
     queue_len: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     label: &'static str,

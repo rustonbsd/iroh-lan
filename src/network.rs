@@ -196,6 +196,17 @@ impl Actor<anyhow::Error> for NetworkActor {
                                     Ok(Ok(tun)) => {
                                         info!("TUN initialized successfully");
                                         self.tun = Some(tun);
+                                        if let Ok(peers) = self.router.get_peers().await {
+                                            for (id, _) in peers {
+                                                info!("Ensuring direct connection after IP assignment: {}", id);
+                                                let direct = self.direct.clone();
+                                                tokio::spawn(async move {
+                                                    if let Err(e) = direct.ensure_connection(id).await {
+                                                        warn!("Failed to ensure connection to {}: {}", id, e);
+                                                    }
+                                                });
+                                            }
+                                        }
                                     }
                                     Ok(Err(e)) => {
                                         error!("Failed to initialize TUN: {}", e);

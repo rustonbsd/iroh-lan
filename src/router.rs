@@ -169,7 +169,6 @@ impl Builder {
                 my_ip: RouterIp::NoIp,
                 assignments_cache: DocCache::new(),
                 candidates_cache: DocCache::new(),
-                presence_cache: DocCache::new(),
             };
             router_actor.run().await
         });
@@ -224,7 +223,6 @@ struct RouterActor {
 
     assignments_cache: DocCache<IpAssignment>,
     candidates_cache: DocCache<IpCandidate>,
-    presence_cache: DocCache<Presence>,
 }
 
 impl Router {
@@ -277,16 +275,6 @@ impl Router {
                     }
                 }
 
-                let presence = actor.read_all_presence().await.unwrap_or_default();
-                let now = current_time();
-                let live_peers = presence
-                    .into_iter()
-                    .filter(|p| now.saturating_sub(p.last_updated) <= actor.presence_ttl_secs())
-                    .map(|p| p.endpoint_id)
-                    .collect::<HashSet<_>>();
-
-                map.retain(|endpoint_id, _| live_peers.contains(endpoint_id));
-
                 map.remove(&actor.endpoint_id);
 
                 Ok(map.into_iter().collect())
@@ -303,9 +291,6 @@ impl Actor<anyhow::Error> for RouterActor {
     async fn run(&mut self) -> Result<()> {
         let mut ip_tick = tokio::time::interval(Duration::from_millis(500));
         ip_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        let mut presence_tick = tokio::time::interval(Self::PRESENCE_REFRESH_INTERVAL);
-        presence_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         let cleanup_interval_secs = 5 + rand::rng().random_range(0..10);
         let mut cleanup_tick = tokio::time::interval(Duration::from_secs(cleanup_interval_secs));
@@ -346,11 +331,6 @@ impl Actor<anyhow::Error> for RouterActor {
                     }
                 }
 
-                _ = presence_tick.tick() => {
-                    if let Err(e) = self.write_presence().await {
-                        warn!("Error writing presence: {}", e);
-                    }
-                }
             }
         }
 
@@ -375,12 +355,6 @@ pub struct IpAssignment {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IpCandidate {
     pub ip: Ipv4Addr,
-    pub endpoint_id: EndpointId,
-    pub last_updated: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Presence {
     pub endpoint_id: EndpointId,
     pub last_updated: u64,
 }
@@ -413,14 +387,6 @@ fn key_ip_candidate(ip: Ipv4Addr, endpoint_id: EndpointId) -> String {
 
 fn key_ip_candidate_prefix() -> String {
     "/candidates/ip/".to_string()
-}
-
-fn key_presence(endpoint_id: EndpointId) -> String {
-    format!("/presence/{endpoint_id}")
-}
-
-fn key_presence_prefix() -> String {
-    "/presence/".to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -456,12 +422,9 @@ impl<T> DocCache<T> {
 
 impl RouterActor {
     const DOC_READ_MIN_INTERVAL: Duration = Duration::from_secs(2);
-    const PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-    const PRESENCE_TTL_SECS: u64 = 10;
+    const ASSIGNMENT_STALE_SECS: u64 = 120;
+    const CANDIDATE_STALE_SECS: u64 = 60;
 
-    fn presence_ttl_secs(&self) -> u64 {
-        Self::PRESENCE_TTL_SECS
-    }
 
     async fn read_all_ip_assignments(&mut self) -> Result<Vec<IpAssignment>> {
         trace!("Reading all IP assignments");
@@ -486,7 +449,7 @@ impl RouterActor {
                 assignments.push(assignment);
             }
         }
-        info!("Found {} IP assignments", assignments.len());
+        trace!("Found {} IP assignments", assignments.len());
         self.assignments_cache.set(assignments.clone());
         Ok(assignments)
     }
@@ -518,44 +481,6 @@ impl RouterActor {
         Ok(candidates)
     }
 
-    async fn read_all_presence(&mut self) -> Result<Vec<Presence>> {
-        trace!("Reading all presence");
-        if let Some(cached) = self.presence_cache.get(Self::DOC_READ_MIN_INTERVAL) {
-            return Ok(cached.to_vec());
-        }
-        let entries = self
-            .doc
-            .get_many(query_prefix(key_presence_prefix()))
-            .await?
-            .collect::<Vec<_>>()
-            .await
-            .iter()
-            .filter_map(|entry| entry.as_ref().ok())
-            .cloned()
-            .collect::<Vec<_>>();
-
-        let mut presence = Vec::new();
-        for entry in entries {
-            if let Ok(p) = entry_to_value::<Presence>(self.blobs.clone(), &entry).await {
-                presence.push(p);
-            }
-        }
-        self.presence_cache.set(presence.clone());
-        Ok(presence)
-    }
-
-    async fn write_presence(&mut self) -> Result<()> {
-        let presence = Presence {
-            endpoint_id: self.endpoint_id,
-            last_updated: current_time(),
-        };
-        let data = postcard::to_stdvec(&presence)?;
-        self.doc
-            .set_bytes(self.author_id, key_presence(self.endpoint_id), data)
-            .await?;
-        self.presence_cache.invalidate();
-        Ok(())
-    }
 
     async fn clear_ip_candidate(&mut self, ip: Ipv4Addr, endpoint_id: EndpointId) -> Result<()> {
         debug!("Clearing IP candidate {} for {}", ip, endpoint_id);
@@ -578,9 +503,11 @@ impl RouterActor {
     // Candidate IPs
     async fn read_ip_candidates(&mut self, ip: Ipv4Addr) -> Result<Vec<IpCandidate>> {
         let candidates = self.read_all_ip_candidates().await?;
+        let now = current_time();
         let filtered = candidates
             .into_iter()
             .filter(|candidate| candidate.ip == ip)
+            .filter(|candidate| now.saturating_sub(candidate.last_updated) <= Self::CANDIDATE_STALE_SECS)
             .collect::<Vec<_>>();
         debug!("candidates for {ip}: {}", filtered.len());
         Ok(filtered)
@@ -848,7 +775,7 @@ impl RouterActor {
 
         // Cleanup assignments
         for a in self.read_all_ip_assignments().await? {
-            if a.endpoint_id == self.endpoint_id && now.saturating_sub(a.last_updated) > 60 {
+            if now.saturating_sub(a.last_updated) > Self::ASSIGNMENT_STALE_SECS {
                 info!(
                     "Removing stale IP assignment for {} (last updated {}s ago)",
                     a.ip,
@@ -865,7 +792,7 @@ impl RouterActor {
 
         // Cleanup candidates
         for c in self.read_all_ip_candidates().await? {
-            if c.endpoint_id == self.endpoint_id && now.saturating_sub(c.last_updated) > 30 {
+            if now.saturating_sub(c.last_updated) > Self::CANDIDATE_STALE_SECS {
                 info!(
                     "Removing stale IP candidate for {} (last updated {}s ago)",
                     c.ip,
