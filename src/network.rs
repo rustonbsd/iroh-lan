@@ -15,7 +15,7 @@ use tracing::{debug, error, info, trace, warn};
 use crate::{Direct, DirectMessage, Router, Tun, local_networking::Ipv4Pkg, router::RouterIp};
 
 const PENDING_TTL: Duration = Duration::from_secs(60);
-const PENDING_MAX_PER_IP: usize = 1024*16;
+const PENDING_MAX_PER_IP: usize = 1024 * 16;
 
 #[derive(Debug, Clone)]
 pub struct Network {
@@ -293,9 +293,17 @@ impl Actor<anyhow::Error> for NetworkActor {
                                 };
                                 match to {
                                     Ok(to) => {
-                                        trace!("Routing packet from TUN to {}", to);
-                                        if let Err(e) = self.direct.route_packet(to, DirectMessage::IpPacket(tun_recv)).await {
-                                            warn!("Failed to route packet to {}: {}", to, e);
+                                        if to == self._iroh_endpoint.id() {
+                                            trace!("Loopback packet detected (dest to self)");
+                                            if let Some(tun) = &self.tun
+                                                && let Err(e) = tun.write(tun_recv).await {
+                                                    warn!("Failed to loopback packet to TUN: {}", e);
+                                                }
+                                        } else {
+                                            trace!("Routing packet from TUN to {}", to);
+                                            if let Err(e) = self.direct.route_packet(to, DirectMessage::IpPacket(tun_recv)).await {
+                                                warn!("Failed to route packet to {}: {}", to, e);
+                                            }
                                         }
                                     }
                                     Err(e) => {
