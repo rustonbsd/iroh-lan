@@ -8,7 +8,7 @@ use iroh::{
     Endpoint, EndpointId,
     endpoint::{RecvStream, SendStream},
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::time::{self, Instant};
 use tracing::{debug, info, trace, warn};
 
@@ -225,6 +225,7 @@ impl Actor<anyhow::Error> for ConnActor {
                     let need_reconnect = !connecting && (
                         self.state == ConnState::Disconnected
                         || self.write_task.as_ref().map(|t| t.is_finished()).unwrap_or(true)
+                        || self.read_task.as_ref().map(|t| t.is_finished()).unwrap_or(true)
                         || self.conn.as_ref().and_then(|c| c.close_reason()).is_some()
                     );
 
@@ -397,7 +398,7 @@ impl ConnActor {
     pub async fn write(&mut self, pkg: DirectMessage) {
         if let Some(tx) = &self.write_tx {
             trace!("Sending packet to write task");
-            match tx.try_send(pkg.clone()) {
+            match tx.try_send(pkg) {
                 Ok(_) => {
                     let new_len = self
                         .queue_len
@@ -612,32 +613,20 @@ async fn write_loop_bounded(
             }
         };
 
-        match time::timeout(WRITE_TIMEOUT, stream.write_u32_le(bytes.len() as u32)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                warn!("Write error (len): {}", e);
-                let _ = api.call(act_ok!(actor => actor.handle_write_error())).await;
-                break;
-            }
-            Err(_) => {
-                warn!("Write timeout (len) ({})", label);
-                let _ = api
-                    .call(act_ok!(actor => async move { actor.inc_write_timeout(); }))
-                    .await;
-                let _ = api.call(act_ok!(actor => actor.handle_write_error())).await;
-                break;
-            }
-        }
+        // Coalesce length and body into a single write to avoid small packets and syscall overhead
+        let mut frame = Vec::with_capacity(4 + bytes.len());
+        frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&bytes);
 
-        match time::timeout(WRITE_TIMEOUT, stream.write_all(&bytes)).await {
+        match time::timeout(WRITE_TIMEOUT, stream.write_all(&frame)).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                warn!("Write error (payload): {}", e);
+                warn!("Write error (frame): {}", e);
                 let _ = api.call(act_ok!(actor => actor.handle_write_error())).await;
                 break;
             }
             Err(_) => {
-                warn!("Write timeout (payload) ({})", label);
+                warn!("Write timeout (frame) ({})", label);
                 let _ = api
                     .call(act_ok!(actor => async move { actor.inc_write_timeout(); }))
                     .await;
@@ -680,6 +669,7 @@ async fn retry_read_loop(
             }
             Err(e) => {
                 warn!("Stream read error: {}", e);
+                let _ = api.call(act_ok!(actor => async move { actor.set_state(ConnState::Disconnected) })).await;
                 break;
             }
         }
