@@ -109,14 +109,21 @@ impl Builder {
 
         let signing_key = SigningKey::from_bytes(&self.secret_key.to_bytes());
         let topic_discovery_config = TopicDiscoveryConfig::new(signing_key);
-        let (gossip_sender, gossip_receiver, topic_handle) = gossip
+        let (gossip_sender, gossip_receiver, topic_handle) = loop {
+            if let Ok((gossip_sender, gossip_receiver, topic_handle)) = gossip
             .subscribe_with_discovery_joined(
                 topic_hash.to_vec(),
                 vec![],
                 endpoint.clone(),
-                topic_discovery_config,
+                topic_discovery_config.clone(),
             )
-            .await?;
+            .await {
+                break (gossip_sender, gossip_receiver, Some(topic_handle));
+            } else {
+                warn!("Failed to join topic; retrying in 2 second");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        };
 
         let doc_peers = gossip_receiver
             .neighbors()
@@ -139,12 +146,12 @@ impl Builder {
             Ok(None) => true,
             Err(_) => true,
         } {
-            if wait_start.elapsed() > Duration::from_secs(10) {
+            if wait_start.elapsed() > Duration::from_secs(30) {
                 warn!("Doc sync peers not available yet; continuing without peers");
                 break;
             }
             debug!("Waiting for doc to be ready...");
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
         let (api, rx) = Handle::channel();
@@ -156,10 +163,12 @@ impl Builder {
                 _docs: docs,
                 doc,
                 endpoint_id: endpoint.id(),
-                _topic: Some(topic_handle),
+                _topic: topic_handle,
                 rx,
                 blobs,
                 my_ip: RouterIp::NoIp,
+                assignments_cache: DocCache::new(),
+                candidates_cache: DocCache::new(),
             };
             router_actor.run().await
         });
@@ -211,6 +220,9 @@ struct RouterActor {
     pub(crate) _topic: Option<TopicDiscoveryHandle>,
 
     pub my_ip: RouterIp,
+
+    assignments_cache: DocCache<IpAssignment>,
+    candidates_cache: DocCache<IpCandidate>,
 }
 
 impl Router {
@@ -254,12 +266,6 @@ impl Router {
                 if let Ok(assignments) = actor.read_all_ip_assignments().await {
                     for a in assignments {
                         map.insert(a.endpoint_id, Some(a.ip));
-                    }
-                }
-
-                if let Ok(cands) = actor.read_all_ip_candidates().await {
-                    for c in cands {
-                        map.entry(c.endpoint_id).or_insert(None);
                     }
                 }
 
@@ -386,9 +392,45 @@ fn key_prefix_ip_candidates(ip: Ipv4Addr) -> String {
     format!("/candidates/ip/{ip}/")
 }
 
+#[derive(Debug, Clone)]
+struct DocCache<T> {
+    value: Vec<T>,
+    last_read: Option<tokio::time::Instant>,
+}
+
+impl<T> DocCache<T> {
+    fn new() -> Self {
+        Self {
+            value: Vec::new(),
+            last_read: None,
+        }
+    }
+
+    fn get(&self, ttl: Duration) -> Option<&[T]> {
+        match self.last_read {
+            Some(ts) if ts.elapsed() < ttl => Some(&self.value),
+            _ => None,
+        }
+    }
+
+    fn set(&mut self, value: Vec<T>) {
+        self.value = value;
+        self.last_read = Some(tokio::time::Instant::now());
+    }
+
+    fn invalidate(&mut self) {
+        self.last_read = None;
+    }
+}
+
 impl RouterActor {
+    const DOC_READ_MIN_INTERVAL: Duration = Duration::from_secs(2);
+
     async fn read_all_ip_assignments(&mut self) -> Result<Vec<IpAssignment>> {
         trace!("Reading all IP assignments");
+        if let Some(cached) = self.assignments_cache.get(Self::DOC_READ_MIN_INTERVAL) {
+            return Ok(cached.to_vec());
+        }
         let entries = self
             .doc
             .get_many(query_prefix(key_ip_assigned_prefix()))
@@ -396,7 +438,7 @@ impl RouterActor {
             .collect::<Vec<_>>()
             .await
             .iter()
-            .filter_map(|entry| entry.as_ref().ok())
+            .filter_map(|entry| { if let Ok(entry) = entry.as_ref() {  Some(entry) } else { warn!("[PEER] entry is not ok!"); None } })
             .cloned()
             .collect::<Vec<_>>();
 
@@ -407,12 +449,16 @@ impl RouterActor {
                 assignments.push(assignment);
             }
         }
-        trace!("Found {} IP assignments", assignments.len());
+        info!("Found {} IP assignments", assignments.len());
+        self.assignments_cache.set(assignments.clone());
         Ok(assignments)
     }
 
     async fn read_all_ip_candidates(&mut self) -> Result<Vec<IpCandidate>> {
         trace!("Reading all IP candidates");
+        if let Some(cached) = self.candidates_cache.get(Self::DOC_READ_MIN_INTERVAL) {
+            return Ok(cached.to_vec());
+        }
         let entries = self
             .doc
             .get_many(query_prefix(key_ip_candidate_prefix()))
@@ -431,6 +477,7 @@ impl RouterActor {
             }
         }
         trace!("Found {} IP candidates", candidates.len());
+        self.candidates_cache.set(candidates.clone());
         Ok(candidates)
     }
 
@@ -439,45 +486,28 @@ impl RouterActor {
         self.doc
             .del(self.author_id, key_ip_candidate(ip, endpoint_id))
             .await?;
+        self.candidates_cache.invalidate();
         Ok(())
     }
 
     // Assigned IPs
     async fn read_ip_assignment(&mut self, ip: Ipv4Addr) -> Result<IpAssignment> {
-        let entry = self
-            .doc
-            .get_one(query(key_ip_assigned(ip)))
+        self.read_all_ip_assignments()
             .await?
-            .context("no assignment found")?;
-
-        entry_to_value(self.blobs.clone(), &entry).await
+            .into_iter()
+            .find(|assignment| assignment.ip == ip)
+            .context("no assignment found")
     }
 
     // Candidate IPs
     async fn read_ip_candidates(&mut self, ip: Ipv4Addr) -> Result<Vec<IpCandidate>> {
-        let entries = self
-            .doc
-            .get_many(query_prefix(key_prefix_ip_candidates(ip)))
-            .await?
-            .collect::<Vec<_>>()
-            .await;
-        debug!(
-            "candidates for {ip}: {:?}",
-            entries
-                .iter()
-                .map(|e| e.as_ref().ok().map(|e| e.content_hash()))
-                .collect::<Vec<_>>()
-        );
-        let mut candidates = Vec::new();
-        for entry in entries.into_iter().flatten() {
-            if let Ok(b) = self.blobs.get_bytes(entry.content_hash()).await
-                && let Ok(candidate) = postcard::from_bytes::<IpCandidate>(&b)
-            {
-                candidates.push(candidate);
-            }
-        }
-
-        Ok(candidates)
+        let candidates = self.read_all_ip_candidates().await?;
+        let filtered = candidates
+            .into_iter()
+            .filter(|candidate| candidate.ip == ip)
+            .collect::<Vec<_>>();
+        debug!("candidates for {ip}: {}", filtered.len());
+        Ok(filtered)
     }
 
     // write ip assigned
@@ -519,7 +549,11 @@ impl RouterActor {
             .set_bytes(self.author_id, key_ip_assigned(ip), data)
             .await?;
 
+        self.assignments_cache.invalidate();
+
         self.clear_ip_candidate(ip, endpoint_id).await.ok();
+
+        self.candidates_cache.invalidate();
 
         Ok(())
     }
@@ -555,6 +589,7 @@ impl RouterActor {
         self.doc
             .set_bytes(self.author_id, key_ip_candidate(ip, endpoint_id), data)
             .await?;
+        self.candidates_cache.invalidate();
         Ok(candidate)
     }
 
@@ -745,6 +780,9 @@ impl RouterActor {
                 );
                 if let Err(e) = self.doc.del(self.author_id, key_ip_assigned(a.ip)).await {
                     warn!("Failed to delete stale IP {}: {}", a.ip, e);
+                } else {
+                    info!("Cleaned up assignment: {:?}", a);
+                    self.assignments_cache.invalidate();
                 }
             }
         }
@@ -758,6 +796,7 @@ impl RouterActor {
                     now - c.last_updated
                 );
                 self.clear_ip_candidate(c.ip, c.endpoint_id).await.ok();
+                self.candidates_cache.invalidate();
             }
         }
         Ok(())

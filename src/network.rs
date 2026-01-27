@@ -218,8 +218,8 @@ impl Actor<anyhow::Error> for NetworkActor {
                         let mut next_peer_ids = HashSet::new();
                         self.ip_cache.clear();
                         for (id, maybe_ip) in peers {
-                            next_peer_ids.insert(id);
                             if let Some(ip) = maybe_ip {
+                                next_peer_ids.insert(id);
                                 self.ip_cache.insert(ip, id);
                             }
                         }

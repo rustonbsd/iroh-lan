@@ -55,7 +55,7 @@ pub async fn run_cli() -> Result<()> {
         use tracing_subscriber::{EnvFilter, fmt, prelude::*};
         tracing_subscriber::registry()
             .with(fmt::layer().with_thread_ids(true))
-            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("trace")))
+            .with(EnvFilter::new("iroh_lan=debug"))
             .init();
     }
 
@@ -90,7 +90,7 @@ async fn run_headless(name: String, password: String) -> Result<()> {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
-            _ = sleep(std::time::Duration::from_millis(250)) => {
+            _ = sleep(std::time::Duration::from_millis(2000)) => {
                 if let Ok(peers) = network.get_peers().await {
                     let new_peers: Vec<_> = peers
                         .iter()
