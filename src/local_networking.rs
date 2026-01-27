@@ -3,6 +3,7 @@ use pnet_packet::{
     MutablePacket, Packet,
     ip::IpNextHeaderProtocols,
     ipv4::{Ipv4Packet, MutableIpv4Packet, checksum},
+    icmp::{MutableIcmpPacket, checksum as icmp_checksum},
     tcp::{MutableTcpPacket, ipv4_checksum as tcp_ipv4_checksum},
     udp::{MutableUdpPacket, ipv4_checksum as udp_ipv4_checksum},
 };
@@ -186,6 +187,15 @@ impl TunActor {
                                         &udp_packet.to_immutable(),
                                         &source,
                                         &destination,
+                                    ));
+                                }
+                            }
+                            IpNextHeaderProtocols::Icmp => {
+                                if let Some(mut icmp_packet) =
+                                    MutableIcmpPacket::new(ipv4_packet.payload_mut())
+                                {
+                                    icmp_packet.set_checksum(icmp_checksum(
+                                        &icmp_packet.to_immutable(),
                                     ));
                                 }
                             }

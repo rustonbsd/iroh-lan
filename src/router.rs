@@ -422,7 +422,7 @@ impl<T> DocCache<T> {
 
 impl RouterActor {
     const DOC_READ_MIN_INTERVAL: Duration = Duration::from_secs(2);
-    const ASSIGNMENT_STALE_SECS: u64 = 120;
+    const ASSIGNMENT_STALE_SECS: u64 = 300;
     const CANDIDATE_STALE_SECS: u64 = 60;
 
 
