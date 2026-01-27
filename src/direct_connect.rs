@@ -188,8 +188,8 @@ impl DirectActor {
             .await;
 
             match accept_result {
-                Ok(Ok((ctrl_send, ctrl_recv, data_send, data_recv))) => {
-                    let _ = api.call(act!(actor => actor.finalize_connection(conn, ctrl_send, ctrl_recv, data_send, data_recv))).await;
+                Ok(Ok((send, recv))) => {
+                    let _ = api.call(act!(actor => actor.finalize_connection(conn, send, recv))).await;
                 }
                 Ok(Err(e)) => {
                     error!("Auth accept failed from {}: {}", remote_id, e);
@@ -207,10 +207,8 @@ impl DirectActor {
     async fn finalize_connection(
         &mut self,
         conn: iroh::endpoint::Connection,
-        ctrl_send: iroh::endpoint::SendStream,
-        ctrl_recv: iroh::endpoint::RecvStream,
-        data_send: iroh::endpoint::SendStream,
-        data_recv: iroh::endpoint::RecvStream,
+        send: iroh::endpoint::SendStream,
+        recv: iroh::endpoint::RecvStream,
     ) -> Result<()> {
         let remote_id = conn.remote_id();
         let prefer_incoming = self.endpoint.id() > remote_id;
@@ -232,7 +230,7 @@ impl DirectActor {
 
                     if let Err(e) = entry
                         .get_mut()
-                        .incoming_connection(conn, ctrl_send, ctrl_recv, data_send, data_recv)
+                        .incoming_connection(conn, send, recv)
                         .await
                     {
                         error!("Failed to upgrade connection to {}: {}", remote_id, e);
@@ -250,10 +248,8 @@ impl DirectActor {
                 match Conn::new(
                     self.endpoint.clone(),
                     conn,
-                    ctrl_send,
-                    ctrl_recv,
-                    data_send,
-                    data_recv,
+                    send,
+                    recv,
                     self.direct_connect_tx.clone(),
                     &self.network_secret,
                 )

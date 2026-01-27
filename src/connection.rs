@@ -8,7 +8,6 @@ use iroh::{
     Endpoint, EndpointId,
     endpoint::{RecvStream, SendStream},
 };
-use pnet_packet::{ip::IpNextHeaderProtocols, ipv4::Ipv4Packet};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{self, Instant};
 use tracing::{debug, info, trace, warn};
@@ -61,16 +60,13 @@ struct ConnActor {
 
     external_sender: tokio::sync::mpsc::Sender<DirectMessage>,
 
-    ctrl_read_task: Option<tokio::task::JoinHandle<()>>,
-    ctrl_write_task: Option<tokio::task::JoinHandle<()>>,
-    ctrl_write_tx: Option<tokio::sync::mpsc::Sender<DirectMessage>>,
+    write_task: Option<tokio::task::JoinHandle<()>>,
+    write_tx: Option<tokio::sync::mpsc::Sender<DirectMessage>>,
 
-    data_read_task: Option<tokio::task::JoinHandle<()>>,
-    data_write_task: Option<tokio::task::JoinHandle<()>>,
-    data_write_tx: Option<tokio::sync::mpsc::Sender<DirectMessage>>,
+    read_task: Option<tokio::task::JoinHandle<()>>,
 
-    ctrl_queue_len: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    data_queue_len: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    queue_len: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    dropped_packets: u64,
 
     sender_queue: VecDeque<DirectMessage>,
     last_rx: Instant,
@@ -79,8 +75,6 @@ struct ConnActor {
     tx_count: u64,
     write_timeouts: u64,
     consecutive_write_errors: u64,
-    dropped_ctrl: u64,
-    dropped_data: u64,
 }
 
 impl Conn {
@@ -88,10 +82,8 @@ impl Conn {
     pub async fn new(
         endpoint: Endpoint,
         conn: iroh::endpoint::Connection,
-        ctrl_send_stream: SendStream,
-        ctrl_recv_stream: RecvStream,
-        data_send_stream: SendStream,
-        data_recv_stream: RecvStream,
+        send_stream: SendStream,
+        recv_stream: RecvStream,
         external_sender: tokio::sync::mpsc::Sender<DirectMessage>,
         network_secret: &[u8; 64],
     ) -> Result<Self> {
@@ -103,10 +95,8 @@ impl Conn {
             endpoint,
             conn.remote_id(),
             Some(conn),
-            Some(ctrl_send_stream),
-            Some(ctrl_recv_stream),
-            Some(data_send_stream),
-            Some(data_recv_stream),
+            Some(send_stream),
+            Some(recv_stream),
             network_secret,
         )
         .await;
@@ -130,8 +120,6 @@ impl Conn {
             None,
             None,
             None,
-            None,
-            None,
             network_secret,
         )
         .await;
@@ -149,12 +137,8 @@ impl Conn {
                 match endpoint.connect(endpoint_id, crate::Direct::ALPN).await {
                     Ok(conn) => {
                         match auth::open(&conn, &network_secret, endpoint.id(), endpoint_id).await {
-                            Ok((ctrl_send, ctrl_recv, data_send, data_recv)) => {
-                                let _ = s
-                                    .incoming_connection(
-                                        conn, ctrl_send, ctrl_recv, data_send, data_recv,
-                                    )
-                                    .await;
+                            Ok((send, recv)) => {
+                                let _ = s.incoming_connection(conn, send, recv).await;
                             }
                             Err(e) => {
                                 warn!("Auth failed during initial connection: {}", e);
@@ -208,13 +192,11 @@ impl Conn {
     pub async fn incoming_connection(
         &self,
         conn: Connection,
-        ctrl_send_stream: SendStream,
-        ctrl_recv_stream: RecvStream,
-        data_send_stream: SendStream,
-        data_recv_stream: RecvStream,
+        send_stream: SendStream,
+        recv_stream: RecvStream,
     ) -> Result<()> {
         self.api
-            .call(act!(actor => actor.incoming_connection(conn, ctrl_send_stream, ctrl_recv_stream, data_send_stream, data_recv_stream)))
+            .call(act!(actor => actor.incoming_connection(conn, send_stream, recv_stream)))
             .await
     }
 }
@@ -242,8 +224,7 @@ impl Actor<anyhow::Error> for ConnActor {
                     let connecting = self.state == ConnState::Connecting;
                     let need_reconnect = !connecting && (
                         self.state == ConnState::Disconnected
-                        || self.ctrl_write_task.as_ref().map(|t| t.is_finished()).unwrap_or(true)
-                        || self.data_write_task.as_ref().map(|t| t.is_finished()).unwrap_or(true)
+                        || self.write_task.as_ref().map(|t| t.is_finished()).unwrap_or(true)
                         || self.conn.as_ref().and_then(|c| c.close_reason()).is_some()
                     );
 
@@ -258,37 +239,35 @@ impl Actor<anyhow::Error> for ConnActor {
                     }
                 }
                 _ = keepalive_ticker.tick(), if self.state == ConnState::Open => {
-                    if let Some(tx) = &self.ctrl_write_tx {
+                    if let Some(tx) = &self.write_tx {
                         match tx.try_send(DirectMessage::IDontLikeWarnings) {
                             Ok(_) => {
-                                let new_len = self.ctrl_queue_len.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                                let new_len = self.queue_len.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                                 if new_len > QUEUE_WARN_LEN {
                                     warn!("Stream queue length high (keepalive): {}", new_len);
                                 }
                             }
                             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                self.dropped_ctrl = self.dropped_ctrl.saturating_add(1);
+                                self.dropped_packets = self.dropped_packets.saturating_add(1);
                             }
                             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                self.dropped_ctrl = self.dropped_ctrl.saturating_add(1);
+                                self.dropped_packets = self.dropped_packets.saturating_add(1);
                             }
                         }
                     }
                 }
                 _ = stats_ticker.tick() => {
                     debug!(
-                        "Conn stats: state={:?} last_rx={:?} last_tx={:?} rx_count={} tx_count={} ctrl_q={} data_q={} write_timeouts={} write_errors={} dropped_ctrl={} dropped_data={}",
+                        "Conn stats: state={:?} last_rx={:?} last_tx={:?} rx_count={} tx_count={} queue_len={} write_timeouts={} write_errors={} dropped_packets={}",
                         self.state,
                         self.last_rx.elapsed(),
                         self.last_tx.elapsed(),
                         self.rx_count,
                         self.tx_count,
-                        self.ctrl_queue_len.load(std::sync::atomic::Ordering::Relaxed),
-                        self.data_queue_len.load(std::sync::atomic::Ordering::Relaxed),
+                        self.queue_len.load(std::sync::atomic::Ordering::Relaxed),
                         self.write_timeouts,
                         self.consecutive_write_errors,
-                        self.dropped_ctrl,
-                        self.dropped_data
+                        self.dropped_packets
                     );
                 }
                 _ = tokio::signal::ctrl_c() => {
@@ -311,89 +290,50 @@ impl ConnActor {
         endpoint: Endpoint,
         conn_endpoint_id: EndpointId,
         conn: Option<iroh::endpoint::Connection>,
-        ctrl_send_stream: Option<SendStream>,
-        mut ctrl_recv_stream: Option<RecvStream>,
-        data_send_stream: Option<SendStream>,
-        mut data_recv_stream: Option<RecvStream>,
+        send_stream: Option<SendStream>,
+        mut recv_stream: Option<RecvStream>,
         network_secret: &[u8; 64],
     ) -> Self {
-        let mut ctrl_read_task = None;
-        if let Some(recv) = ctrl_recv_stream.take() {
-            info!("Spawning control read task immediately in new");
+        let mut read_task = None;
+        if let Some(recv) = recv_stream.take() {
+            info!("Spawning read task immediately in new");
             let task = tokio::spawn(retry_read_loop(
                 recv,
                 external_sender.clone(),
                 self_handle.clone(),
             ));
-            ctrl_read_task = Some(task);
+            read_task = Some(task);
         }
 
-        let mut ctrl_write_task = None;
-        let mut ctrl_write_tx = None;
-        let ctrl_queue_len = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        if let Some(send) = ctrl_send_stream {
-            info!("Spawning control write task immediately in new");
+        let mut write_task = None;
+        let mut write_tx = None;
+        let queue_len = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        if let Some(send) = send_stream {
+            info!("Spawning write task immediately in new");
             let (tx, rx) = tokio::sync::mpsc::channel(WRITE_CHANNEL_CAP);
             let task = tokio::spawn(write_loop_bounded(
                 send,
                 rx,
                 self_handle.clone(),
-                ctrl_queue_len.clone(),
-                "control",
+                queue_len.clone(),
+                "main",
             ));
-            ctrl_write_task = Some(task);
-            ctrl_write_tx = Some(tx);
-        }
-
-        let mut data_read_task = None;
-        if let Some(recv) = data_recv_stream.take() {
-            info!("Spawning data read task immediately in new");
-            let task = tokio::spawn(retry_read_loop(
-                recv,
-                external_sender.clone(),
-                self_handle.clone(),
-            ));
-            data_read_task = Some(task);
-        }
-
-        let mut data_write_task = None;
-        let mut data_write_tx = None;
-        let data_queue_len = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        if let Some(send) = data_send_stream {
-            info!("Spawning data write task immediately in new");
-            let (tx, rx) = tokio::sync::mpsc::channel(WRITE_CHANNEL_CAP);
-            let task = tokio::spawn(write_loop_bounded(
-                send,
-                rx,
-                self_handle.clone(),
-                data_queue_len.clone(),
-                "data",
-            ));
-            data_write_task = Some(task);
-            data_write_tx = Some(tx);
+            write_task = Some(task);
+            write_tx = Some(tx);
         }
 
         Self {
             rx,
-            state: if conn.is_some()
-                && ctrl_write_task.is_some()
-                && ctrl_read_task.is_some()
-                && data_write_task.is_some()
-                && data_read_task.is_some()
-            {
+            state: if conn.is_some() && write_task.is_some() && read_task.is_some() {
                 ConnState::Open
             } else {
                 ConnState::Disconnected
             },
             external_sender,
-            ctrl_read_task,
-            ctrl_write_task,
-            ctrl_write_tx,
-            data_read_task,
-            data_write_task,
-            data_write_tx,
-            ctrl_queue_len,
-            data_queue_len,
+            read_task,
+            write_task,
+            write_tx,
+            queue_len,
             sender_queue: VecDeque::with_capacity(QUEUE_SIZE),
             conn,
             endpoint,
@@ -409,8 +349,7 @@ impl ConnActor {
             tx_count: 0,
             write_timeouts: 0,
             consecutive_write_errors: 0,
-            dropped_ctrl: 0,
-            dropped_data: 0,
+            dropped_packets: 0,
         }
     }
 
@@ -430,20 +369,13 @@ impl ConnActor {
         if let Some(conn) = self.conn.as_mut() {
             conn.close(VarInt::from_u32(400), b"Connection closed by user");
         }
-        if let Some(task) = self.ctrl_read_task.take() {
+        if let Some(task) = self.read_task.take() {
             task.abort();
         }
-        if let Some(task) = self.ctrl_write_task.take() {
+        if let Some(task) = self.write_task.take() {
             task.abort();
         }
-        if let Some(task) = self.data_read_task.take() {
-            task.abort();
-        }
-        if let Some(task) = self.data_write_task.take() {
-            task.abort();
-        }
-        self.ctrl_write_tx = None;
-        self.data_write_tx = None;
+        self.write_tx = None;
         self.conn = None;
     }
 
@@ -453,12 +385,8 @@ impl ConnActor {
             "Write loop failed. consecutive_write_errors={}",
             self.consecutive_write_errors
         );
-        self.ctrl_write_tx = None;
-        self.data_write_tx = None;
-        if let Some(task) = self.ctrl_write_task.take() {
-            task.abort();
-        }
-        if let Some(task) = self.data_write_task.take() {
+        self.write_tx = None;
+        if let Some(task) = self.write_task.take() {
             task.abort();
         }
         if self.consecutive_write_errors >= MAX_CONSECUTIVE_WRITE_ERRORS {
@@ -467,51 +395,24 @@ impl ConnActor {
     }
 
     pub async fn write(&mut self, pkg: DirectMessage) {
-        let mut use_data_stream = false;
-        if let DirectMessage::IpPacket(ip_pkg) = &pkg {
-            let protocol = Ipv4Packet::new(ip_pkg.as_slice()).map(|p| p.get_next_level_protocol());
-            if matches!(
-                protocol,
-                Some(IpNextHeaderProtocols::Tcp) | Some(IpNextHeaderProtocols::Udp)
-            ) {
-                use_data_stream = true;
-            }
-        }
-
-        let target_tx = if use_data_stream {
-            &self.data_write_tx
-        } else {
-            &self.ctrl_write_tx
-        };
-
-        if let Some(tx) = target_tx {
+        if let Some(tx) = &self.write_tx {
             trace!("Sending packet to write task");
             match tx.try_send(pkg.clone()) {
                 Ok(_) => {
-                    let new_len = if use_data_stream {
-                        self.data_queue_len
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                            + 1
-                    } else {
-                        self.ctrl_queue_len
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                            + 1
-                    };
+                    let new_len = self
+                        .queue_len
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
                     if new_len > QUEUE_WARN_LEN {
                         warn!("Stream queue length high: {}", new_len);
                     }
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    if use_data_stream {
-                        self.dropped_data = self.dropped_data.saturating_add(1);
-                    } else {
-                        self.dropped_ctrl = self.dropped_ctrl.saturating_add(1);
-                    }
-                    if (self.dropped_data + self.dropped_ctrl).is_multiple_of(1000) {
+                    self.dropped_packets = self.dropped_packets.saturating_add(1);
+                    if self.dropped_packets.is_multiple_of(1000) {
                         warn!(
-                            "Write queue full, dropping packet (ctrl_dropped={}, data_dropped={})",
-                            self.dropped_ctrl,
-                            self.dropped_data
+                            "Write queue full, dropping packet (dropped={})",
+                            self.dropped_packets
                         );
                     }
                 }
@@ -556,10 +457,8 @@ impl ConnActor {
     pub async fn incoming_connection(
         &mut self,
         conn: Connection,
-        ctrl_send_stream: SendStream,
-        ctrl_recv_stream: RecvStream,
-        data_send_stream: SendStream,
-        data_recv_stream: RecvStream,
+        send_stream: SendStream,
+        recv_stream: RecvStream,
     ) -> Result<()> {
         info!("Incoming connection from: {}", conn.remote_id());
         if conn.close_reason().is_some() {
@@ -568,61 +467,33 @@ impl ConnActor {
             return Err(anyhow::anyhow!("connection closed"));
         }
 
-        if let Some(task) = self.ctrl_read_task.take() {
+        if let Some(task) = self.read_task.take() {
             task.abort();
         }
 
-        info!("Spawning control read task for incoming connection");
-        self.ctrl_read_task = Some(tokio::spawn(retry_read_loop(
-            ctrl_recv_stream,
+        info!("Spawning read task for incoming connection");
+        self.read_task = Some(tokio::spawn(retry_read_loop(
+            recv_stream,
             self.external_sender.clone(),
             self.self_handle.clone(),
         )));
 
-        if let Some(task) = self.ctrl_write_task.take() {
+        if let Some(task) = self.write_task.take() {
             task.abort();
         }
 
-        info!("Spawning control write task for incoming connection");
-        let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel(WRITE_CHANNEL_CAP);
-        self.ctrl_queue_len
+        info!("Spawning write task for incoming connection");
+        let (tx, rx) = tokio::sync::mpsc::channel(WRITE_CHANNEL_CAP);
+        self.queue_len
             .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.ctrl_write_task = Some(tokio::spawn(write_loop_bounded(
-            ctrl_send_stream,
-            ctrl_rx,
+        self.write_task = Some(tokio::spawn(write_loop_bounded(
+            send_stream,
+            rx,
             self.self_handle.clone(),
-            self.ctrl_queue_len.clone(),
-            "control",
+            self.queue_len.clone(),
+            "main",
         )));
-        self.ctrl_write_tx = Some(ctrl_tx.clone());
-
-        if let Some(task) = self.data_read_task.take() {
-            task.abort();
-        }
-
-        info!("Spawning data read task for incoming connection");
-        self.data_read_task = Some(tokio::spawn(retry_read_loop(
-            data_recv_stream,
-            self.external_sender.clone(),
-            self.self_handle.clone(),
-        )));
-
-        if let Some(task) = self.data_write_task.take() {
-            task.abort();
-        }
-
-        info!("Spawning data write task for incoming connection");
-        let (data_tx, data_rx) = tokio::sync::mpsc::channel(WRITE_CHANNEL_CAP);
-        self.data_queue_len
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.data_write_task = Some(tokio::spawn(write_loop_bounded(
-            data_send_stream,
-            data_rx,
-            self.self_handle.clone(),
-            self.data_queue_len.clone(),
-            "data",
-        )));
-        self.data_write_tx = Some(data_tx.clone());
+        self.write_tx = Some(tx.clone());
 
         self.conn = Some(conn);
         self.set_state(ConnState::Open);
@@ -630,18 +501,21 @@ impl ConnActor {
         self.consecutive_write_errors = 0;
 
         while let Some(msg) = self.sender_queue.pop_back() {
-            match ctrl_tx.try_send(msg) {
+            match tx.try_send(msg) {
                 Ok(_) => {
-                    let new_len = self.ctrl_queue_len.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let new_len = self
+                        .queue_len
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
                     if new_len > QUEUE_WARN_LEN {
                         warn!("Stream queue length high (flush): {}", new_len);
                     }
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    self.dropped_ctrl = self.dropped_ctrl.saturating_add(1);
+                    self.dropped_packets = self.dropped_packets.saturating_add(1);
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    self.dropped_ctrl = self.dropped_ctrl.saturating_add(1);
+                    self.dropped_packets = self.dropped_packets.saturating_add(1);
                 }
             }
         }
@@ -655,20 +529,13 @@ impl ConnActor {
             warn!("Cannot reconnect, actor is closed");
             return Err(anyhow::anyhow!("actor closed for good"));
         }
-        if let Some(task) = self.ctrl_read_task.take() {
+        if let Some(task) = self.read_task.take() {
             task.abort();
         }
-        if let Some(task) = self.ctrl_write_task.take() {
+        if let Some(task) = self.write_task.take() {
             task.abort();
         }
-        if let Some(task) = self.data_read_task.take() {
-            task.abort();
-        }
-        if let Some(task) = self.data_write_task.take() {
-            task.abort();
-        }
-        self.ctrl_write_tx = None;
-        self.data_write_tx = None;
+        self.write_tx = None;
 
         self.state = ConnState::Connecting;
         let next_backoff = self.reconnect_backoff * 2;
@@ -691,9 +558,9 @@ impl ConnActor {
                 if let Ok(conn) = endpoint.connect(conn_node_id, crate::Direct::ALPN).await {
                     debug!("Reconnection successful");
                     match auth::open(&conn, &network_secret, endpoint.id(), conn_node_id).await {
-                        Ok((ctrl_send, ctrl_recv, data_send, data_recv)) => {
+                        Ok((send, recv)) => {
                             let _ = api
-                                .call(act!(actor => actor.incoming_connection(conn, ctrl_send, ctrl_recv, data_send, data_recv)))
+                                .call(act!(actor => actor.incoming_connection(conn, send, recv)))
                                 .await;
                             let _ = api
                                 .call(act_ok!(actor => async move { actor.reconnect_count.store(0, std::sync::atomic::Ordering::SeqCst) }))
