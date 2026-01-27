@@ -139,30 +139,21 @@ impl DirectActor {
         info!("New direct connection from {:?}", conn.remote_id());
         let remote_id = conn.remote_id();
         if let Some(router) = &self.router {
-            match router.get_ip_state().await {
-                Ok(RouterIp::AssignedIp(_)) => {}
-                _ => {
-                    info!(
-                        "Rejecting connection from {}: local IP not assigned",
-                        remote_id
-                    );
-                    conn.close(VarInt::from_u32(425), b"local ip not assigned");
-                    return Ok(());
-                }
+            if !matches!(router.get_ip_state().await, Ok(RouterIp::AssignedIp(_))) {
+                info!(
+                    "Accepting connection from {} before local IP assignment",
+                    remote_id
+                );
             }
 
             if router.get_ip_from_endpoint_id(remote_id).await.is_err() {
                 info!(
-                    "Rejecting connection from {}: remote IP not assigned",
+                    "Accepting connection from {} before remote IP assignment",
                     remote_id
                 );
-                conn.close(VarInt::from_u32(426), b"remote ip not assigned");
-                return Ok(());
             }
         } else {
-            info!("Rejecting connection from {}: router not ready", remote_id);
-            conn.close(VarInt::from_u32(424), b"router not ready");
-            return Ok(());
+            info!("Accepting connection from {} before router ready", remote_id);
         }
         let prefer_incoming = self.endpoint.id() > remote_id;
 
