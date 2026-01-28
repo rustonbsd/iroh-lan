@@ -1,9 +1,9 @@
 use anyhow::Result;
 use pnet_packet::{
     MutablePacket, Packet,
-    ip::IpNextHeaderProtocols,
-    ipv4::{Ipv4Packet, MutableIpv4Packet, checksum},
     icmp::{MutableIcmpPacket, checksum as icmp_checksum},
+    ip::IpNextHeaderProtocols,
+    ipv4::{Ipv4Flags, Ipv4Packet, MutableIpv4Packet, checksum},
     tcp::{MutableTcpPacket, ipv4_checksum as tcp_ipv4_checksum},
     udp::{MutableUdpPacket, ipv4_checksum as udp_ipv4_checksum},
 };
@@ -164,42 +164,51 @@ impl TunActor {
                             continue;
                         }
 
-                        // re-calculate and set checksum
+                        // re-calculate and set checksum for the IP header
                         ipv4_packet.set_checksum(checksum(&ipv4_packet.to_immutable()));
 
-                        match ipv4_packet.get_next_level_protocol() {
-                            IpNextHeaderProtocols::Tcp => {
-                                if let Some(mut tcp_packet) =
-                                    MutableTcpPacket::new(ipv4_packet.payload_mut())
-                                {
-                                    tcp_packet.set_checksum(tcp_ipv4_checksum(
-                                        &tcp_packet.to_immutable(),
-                                        &source,
-                                        &destination,
-                                    ));
+                        // Check if this is a fragment
+                        // If offset > 0, it's a tail fragment (no L4 header).
+                        // If MF (MoreFragments) flag is set, it's a head fragment (checksum covers future data we don't have).
+                        let is_fragment = (ipv4_packet.get_flags() & Ipv4Flags::MoreFragments) != 0
+                            || ipv4_packet.get_fragment_offset() > 0;
+
+                        if !is_fragment {
+                            // ONLY calculate L4 checksums for whole packets
+                            match ipv4_packet.get_next_level_protocol() {
+                                IpNextHeaderProtocols::Tcp => {
+                                    if let Some(mut tcp_packet) =
+                                        MutableTcpPacket::new(ipv4_packet.payload_mut())
+                                    {
+                                        tcp_packet.set_checksum(tcp_ipv4_checksum(
+                                            &tcp_packet.to_immutable(),
+                                            &source,
+                                            &destination,
+                                        ));
+                                    }
                                 }
-                            }
-                            IpNextHeaderProtocols::Udp => {
-                                if let Some(mut udp_packet) =
-                                    MutableUdpPacket::new(ipv4_packet.payload_mut())
-                                {
-                                    udp_packet.set_checksum(udp_ipv4_checksum(
-                                        &udp_packet.to_immutable(),
-                                        &source,
-                                        &destination,
-                                    ));
+                                IpNextHeaderProtocols::Udp => {
+                                    if let Some(mut udp_packet) =
+                                        MutableUdpPacket::new(ipv4_packet.payload_mut())
+                                    {
+                                        udp_packet.set_checksum(udp_ipv4_checksum(
+                                            &udp_packet.to_immutable(),
+                                            &source,
+                                            &destination,
+                                        ));
+                                    }
                                 }
-                            }
-                            IpNextHeaderProtocols::Icmp => {
-                                if let Some(mut icmp_packet) =
-                                    MutableIcmpPacket::new(ipv4_packet.payload_mut())
-                                {
-                                    icmp_packet.set_checksum(icmp_checksum(
-                                        &icmp_packet.to_immutable(),
-                                    ));
+                                IpNextHeaderProtocols::Icmp => {
+                                    if let Some(mut icmp_packet) =
+                                        MutableIcmpPacket::new(ipv4_packet.payload_mut())
+                                    {
+                                        icmp_packet.set_checksum(icmp_checksum(
+                                            &icmp_packet.to_immutable(),
+                                        ));
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
 
                         if let Ok(pkg) = Ipv4Pkg::new(ipv4_packet.packet()) {
