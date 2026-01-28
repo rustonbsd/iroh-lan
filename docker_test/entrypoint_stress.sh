@@ -114,13 +114,13 @@ if [ -z "$GOT_IP" ]; then
 fi
 
 echo "Assigned IP: $GOT_IP"
-if [ "$GOT_IP" == "172.22.0.2" ]; then
+if [ "$GOT_IP" == "172.30.0.2" ]; then
     ROLE="server"
-    PEER_IP="172.22.0.3"
+    PEER_IP="172.30.0.3"
     echo "I am the SERVER (since I got .2)"
-elif [ "$GOT_IP" == "172.22.0.3" ]; then
+elif [ "$GOT_IP" == "172.30.0.3" ]; then
     ROLE="client"
-    PEER_IP="172.22.0.2"
+    PEER_IP="172.30.0.2"
     echo "I am the CLIENT (since I got .3)"
 else
     echo "Error: Unexpected IP $GOT_IP"

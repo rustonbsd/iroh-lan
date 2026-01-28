@@ -750,12 +750,12 @@ impl RouterActor {
                 .collect::<HashSet<_>>(),
         );
 
-        // Scan for the first available IP starting from 172.22.0.2
+        // Scan for the first available IP starting from 172.30.0.2
         for i in 2u16..65534 {
             let octet3 = (i >> 8) as u8;
             let octet4 = (i & 0xFF) as u8;
 
-            // Skip network/broadcast addresses if needed, though 172.22.0.0/16 is a large subnet.
+            // Skip network/broadcast addresses if needed, though 172.30.0.0/16 is a large subnet.
             // Keeping it simple: avoid .0 and .255 in the last octet to be safe for standard /24 clients
             if octet4 == 0 || octet4 == 255 {
                 continue;

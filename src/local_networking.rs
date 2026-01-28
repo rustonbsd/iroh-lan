@@ -75,7 +75,7 @@ impl Tun {
         free_ip_ending: (u8, u8),
         to_remote_writer: tokio::sync::mpsc::Sender<Ipv4Pkg>,
     ) -> Result<Self> {
-        let ip = Ipv4Addr::new(172, 22, free_ip_ending.0, free_ip_ending.1);
+        let ip = Ipv4Addr::new(172, 30, free_ip_ending.0, free_ip_ending.1);
 
         #[cfg(target_os = "windows")]
         dll_export().await?;
