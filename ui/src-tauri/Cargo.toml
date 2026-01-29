@@ -7,7 +7,7 @@ repository = "https://github.com/rustonbsd/iroh-lan"
 readme = "README.md"
 keywords = ["networking"]
 categories = ["network-programming"]
-version = "0.1.2"
+version = "1.0.0"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

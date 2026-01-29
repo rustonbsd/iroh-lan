@@ -15,8 +15,30 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  network-stress-test:
+    name: Network Stress Test (Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Stress Test
+        # Run test for 2 minutes to ensure stability
+        run: |
+          export GAME_TEST_DURATION=2
+          make stress-test
+
+  approve-build:
+    name: Approve Build
+    needs: network-stress-test
+    runs-on: ubuntu-latest
+    environment: ui-build
+    steps:
+      - run: echo "Manual approval received."
+
   build-tauri:
     name: Build Tauri ${{ matrix.platform.name }}
+    needs: approve-build
     runs-on: ${{ matrix.platform.runs-on }}
     strategy:
       fail-fast: false

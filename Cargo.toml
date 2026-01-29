@@ -7,13 +7,13 @@ repository = "https://github.com/rustonbsd/iroh-lan"
 readme = "README.md"
 keywords = ["networking"]
 categories = ["network-programming"]
-version = "0.1.2"
+version = "1.0.0"
 edition = "2024"
 
 
 [dependencies]
 anyhow = "1"
-distributed-topic-tracker = "0.2.5"
+iroh-topic-tracker = { git = "https://github.com/rustonbsd/iroh-topic-tracker", rev="ff4535720b32bcc7ff1b887e303a01168ebaa457" }
 ed25519-dalek = "3.0.0-pre.1"
 iroh = "0.95.1"
 iroh-gossip = "0.95.0"
@@ -33,8 +33,13 @@ sha2 = "0.10"
 z32 = "1"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1"
 
 actor-helper = "0.2"
+clap = { version = "4.5.54", features = ["derive"] }
+ratatui = "0.30.0"
+crossterm = "0.29.0"
+
 
 
 [lib]
@@ -42,12 +47,12 @@ path = "src/lib.rs"
 crate-type = ["lib"]
 bench = false
 
+[[bin]]
+name = "iroh-lan"
+path = "src/bin/cli.rs"
+
 [[example]]
 name = "participant"
 path = "examples/participant.rs"
 crate-type = ["bin"]
 
-[[example]]
-name = "creator"
-path = "examples/creator.rs"
-crate-type = ["bin"]

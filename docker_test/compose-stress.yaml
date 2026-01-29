@@ -1,0 +1,57 @@
+services:
+  node0:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: iroh-lan-test
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    command: ["server"]
+    healthcheck:
+      test: ["CMD", "grep", "-q", "AssignedIp(", "/app/results/iroh.log"]
+      interval: 2s
+      timeout: 30s
+      retries: 60
+    entrypoint: ["/app/entrypoint_stress.sh", "server"]
+    environment:
+      - GAME_TEST_DURATION=${GAME_TEST_DURATION:-1}
+      - TOPIC=${TOPIC}
+      - STRESS_VERBOSE=1
+      - RUST_LOG=${RUST_LOG:-iroh_lan=trace,iroh=info,iroh_gossip=info}
+    volumes:
+      - ./results_stress/server:/app/results
+      - ../target/debug:/app/bin
+      - coord:/coord
+    networks:
+      testnet:
+  node1:
+    image: iroh-lan-test
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    command: ["client"]
+    entrypoint: ["/app/entrypoint_stress.sh", "client"]
+    environment:
+      - GAME_TEST_DURATION=${GAME_TEST_DURATION:-1}
+      - TOPIC=${TOPIC}
+      - STRESS_VERBOSE=1
+      - RUST_LOG=${RUST_LOG:-iroh_lan=trace,iroh=info,iroh_gossip=info}
+    volumes:
+      - ./results_stress/client:/app/results
+      - ../target/debug:/app/bin
+      - coord:/coord
+    networks:
+      testnet:
+
+volumes:
+  coord:
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.50.0.0/16

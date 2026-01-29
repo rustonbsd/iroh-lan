@@ -1,4 +1,4 @@
-use iroh_lan::{RouterIp, network::Network};
+use iroh_lan::{RouterIp, Network};
 use tokio::time::sleep;
 
 #[tokio::main]
@@ -22,14 +22,15 @@ async fn main() -> anyhow::Result<()> {
         sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    println!("my ip is {:?}", network.get_router_state().await?);
+    if let RouterIp::AssignedIp(ip) = network.get_router_state().await? {
+        println!("My IP is {}", ip);
+    }
 
     tokio::spawn(async move {
         loop {
-            println!(
-                "Network started with endpoint ID {:?}",
-                network.get_router_state().await
-            );
+            if let Ok(RouterIp::AssignedIp(ip)) = network.get_router_state().await {
+                 println!("My IP is still {}", ip);
+            }
             sleep(std::time::Duration::from_secs(5)).await;
         }
     });
