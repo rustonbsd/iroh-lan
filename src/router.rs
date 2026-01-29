@@ -761,7 +761,7 @@ impl RouterActor {
                 continue;
             }
 
-            let ip = Ipv4Addr::new(172, 22, octet3, octet4);
+            let ip = Ipv4Addr::new(172, 30, octet3, octet4);
             if !used_ips.contains(&ip) {
                 return Ok(ip);
             }
