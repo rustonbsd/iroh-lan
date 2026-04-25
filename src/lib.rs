@@ -1,11 +1,13 @@
-//mod direct_connect;
-//mod local_networking;
 mod connection;
 mod direct_connect;
+pub mod kv;
 mod local_networking;
-pub mod network;
+mod network;
 mod router;
+pub mod cli;
 
+pub use kv::Kv;
+pub use network::Network;
 pub use connection::ConnState;
 pub use direct_connect::{Direct, DirectMessage};
 pub use local_networking::Tun;

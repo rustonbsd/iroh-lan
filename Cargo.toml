@@ -7,25 +7,23 @@ repository = "https://github.com/rustonbsd/iroh-lan"
 readme = "README.md"
 keywords = ["networking"]
 categories = ["network-programming"]
-version = "0.1.2"
+version = "1.0.0-pre.1"
 edition = "2024"
 
 
 [dependencies]
 anyhow = "1"
-distributed-topic-tracker = "0.2.5"
-ed25519-dalek = "3.0.0-pre.1"
-iroh = "0.95.1"
-iroh-gossip = "0.95.0"
-iroh-docs = "0.95.0"
-iroh-blobs = "0.97.0"
+iroh-topic-tracker = { git = "https://github.com/rustonbsd/iroh-topic-tracker", rev="58320f1d3e6c46cc0e6bfce9e1c8f0f79a92a94a" }
+ed25519-dalek = "3.0.0-pre.6"
+iroh = { version="0.98.1", features=["address-lookup-pkarr-dht", "qlog", "tls-ring"] }
+iroh-gossip = "0.98.0"
 runas = "1"
 tokio = "1"
-nix = { version = "0.30", features = ["process"] }
+nix = { version = "0.31", features = ["process"] }
 self-runas = "0.1"
 rand = "0.9"
 pnet_packet = "0.35"
-tun-rs = { version = "2.7.7", features = ["async"] }
+tun-rs = { version = "2.8", features = ["async"] }
 serde = "1"
 futures = "0.3"
 postcard = { version = "1", features = ["use-std"] }
@@ -33,21 +31,32 @@ sha2 = "0.10"
 z32 = "1"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1"
+chrono = { version = "0.4" }
+n0-watcher = "0.6"
 
-actor-helper = "0.2"
-
+iroh-auth = { git="https://github.com/rustonbsd/iroh-auth", rev="70c7bca92bae179212fe6088105ca3025490fff4" }
+actor-helper = { version="0.3.0", features=["anyhow", "tokio"]} #{ git = "https://github.com/rustonbsd/actor-helper", rev="9af542cc2d26354dcc4d87d270408326aa319397", features=["anyhow", "tokio"] }
+clap = { version = "4.6", features = ["derive"] }
+ratatui = "0.30.0"
+crossterm = "0.29.0"
+noq = { version = "0.18" }
+url = "2"
+iroh-relay = "0.98"
 
 [lib]
 path = "src/lib.rs"
 crate-type = ["lib"]
 bench = false
 
+[[bin]]
+name = "iroh-lan"
+path = "src/bin/cli.rs"
+
 [[example]]
 name = "participant"
 path = "examples/participant.rs"
 crate-type = ["bin"]
 
-[[example]]
-name = "creator"
-path = "examples/creator.rs"
-crate-type = ["bin"]
+
+[patch.crates-io]

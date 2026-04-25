@@ -1,0 +1,123 @@
+services:
+  node0:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: iroh-lan-test
+    cap_add:
+      - NET_ADMIN
+      - SYS_PTRACE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    entrypoint: ["/app/entrypoint_reliability.sh"]
+    environment:
+      - NODE_INDEX=0
+      - NODE_COUNT=5
+      - TOPIC=${TOPIC}
+      - RECONNECT_MAX_SEC=${RECONNECT_MAX_SEC:-60}
+      - RUST_LOG=${RUST_LOG:-iroh_lan=trace,iroh=info,iroh_gossip=info}
+      - MESH_TICK_MS=${MESH_TICK_MS:-100}
+    volumes:
+      - ./results_reliability/node0:/app/results
+      - ../target/debug:/app/bin
+      - coord:/coord
+    networks:
+      testnet:
+
+  node1:
+    image: iroh-lan-test
+    cap_add:
+      - NET_ADMIN
+      - SYS_PTRACE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    entrypoint: ["/app/entrypoint_reliability.sh"]
+    environment:
+      - NODE_INDEX=1
+      - NODE_COUNT=5
+      - TOPIC=${TOPIC}
+      - RECONNECT_MAX_SEC=${RECONNECT_MAX_SEC:-60}
+      - RUST_LOG=${RUST_LOG:-iroh_lan=trace,iroh=info,iroh_gossip=info}
+      - MESH_TICK_MS=${MESH_TICK_MS:-100}
+    volumes:
+      - ./results_reliability/node1:/app/results
+      - ../target/debug:/app/bin
+      - coord:/coord
+    networks:
+      testnet:
+
+  node2:
+    image: iroh-lan-test
+    cap_add:
+      - NET_ADMIN
+      - SYS_PTRACE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    entrypoint: ["/app/entrypoint_reliability.sh"]
+    environment:
+      - NODE_INDEX=2
+      - NODE_COUNT=5
+      - TOPIC=${TOPIC}
+      - RECONNECT_MAX_SEC=${RECONNECT_MAX_SEC:-60}
+      - RUST_LOG=${RUST_LOG:-iroh_lan=trace,iroh=info,iroh_gossip=info}
+      - MESH_TICK_MS=${MESH_TICK_MS:-100}
+    volumes:
+      - ./results_reliability/node2:/app/results
+      - ../target/debug:/app/bin
+      - coord:/coord
+    networks:
+      testnet:
+
+  node3:
+    image: iroh-lan-test
+    cap_add:
+      - NET_ADMIN
+      - SYS_PTRACE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    entrypoint: ["/app/entrypoint_reliability.sh"]
+    environment:
+      - NODE_INDEX=3
+      - NODE_COUNT=5
+      - TOPIC=${TOPIC}
+      - RECONNECT_MAX_SEC=${RECONNECT_MAX_SEC:-60}
+      - RUST_LOG=${RUST_LOG:-iroh_lan=trace,iroh=info,iroh_gossip=info}
+      - MESH_TICK_MS=${MESH_TICK_MS:-100}
+    volumes:
+      - ./results_reliability/node3:/app/results
+      - ../target/debug:/app/bin
+      - coord:/coord
+    networks:
+      testnet:
+
+  node4:
+    image: iroh-lan-test
+    cap_add:
+      - NET_ADMIN
+      - SYS_PTRACE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    entrypoint: ["/app/entrypoint_reliability.sh"]
+    environment:
+      - NODE_INDEX=4
+      - NODE_COUNT=5
+      - TOPIC=${TOPIC}
+      - RECONNECT_MAX_SEC=${RECONNECT_MAX_SEC:-60}
+      - RUST_LOG=${RUST_LOG:-iroh_lan=trace,iroh=info,iroh_gossip=info}
+      - MESH_TICK_MS=${MESH_TICK_MS:-100}
+    volumes:
+      - ./results_reliability/node4:/app/results
+      - ../target/debug:/app/bin
+      - coord:/coord
+    networks:
+      testnet:
+
+volumes:
+  coord:
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.60.0.0/16

@@ -1,25 +1,29 @@
-use std::{
-    collections::VecDeque,
-    sync::atomic::AtomicUsize,
-    time::{Duration, SystemTime},
-};
+use std::fmt::Display;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::{collections::VecDeque, sync::atomic::AtomicUsize, time::Duration};
 
 use crate::DirectMessage;
-use actor_helper::{Action, Actor, Handle, Receiver, act, act_ok};
+use actor_helper::{Action, ActorState, Handle, Receiver, act, act_ok};
 use anyhow::Result;
+use bytes::Bytes;
 use iroh::endpoint::{Connection, VarInt};
-use iroh::{
-    Endpoint, EndpointId,
-    endpoint::{RecvStream, SendStream},
-};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{debug, warn};
+use iroh::{Endpoint, EndpointId};
+use n0_watcher::Watchable;
+use tokio::time::{self};
+use tracing::{debug, info, trace, warn};
 
 const QUEUE_SIZE: usize = 1024 * 16;
-const MAX_RECONNECTS: usize = 5;
-const RECONNECT_BACKOFF_BASE: Duration = Duration::from_millis(100);
+const BACKPRESSURE_WARN_MS: u128 = 5;
+const MAX_SENDER_QUEUE: usize = 50_000;
+const WRITE_CHANNEL_CAP: usize = 8_192;
+const STATS_LOG_INTERVAL: Duration = Duration::from_secs(5);
+const QUEUE_WARN_LEN: usize = 10_000;
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(2);
+const CONNECTING_TIMEOUT: Duration = Duration::from_secs(20);
+const DATAGRAM_PREFIX: u8 = 0x43;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conn {
     api: Handle<ConnActor, anyhow::Error>,
 }
@@ -27,17 +31,16 @@ pub struct Conn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnState {
     Connecting, // ConnActor::connect() called, waiting for connection to be established (in background)
-    Idle,       // no active connection, can be connected
     Open,       // open bi directional streams
     Closed,     // connection closed by user or error
     Disconnected, // connection closed by remote peer, can be recovered within 5 retries after Closed
+    ClosedAndStopped, // connection closed and actor stopped, no recovery possible
 }
 
 #[derive(Debug)]
 struct ConnActor {
-    rx: Receiver<Action<ConnActor>>,
-    self_handle: Handle<ConnActor, anyhow::Error>,
-    state: ConnState,
+    self_handle: Option<Handle<ConnActor, anyhow::Error>>,
+    state: Watchable<ConnState>,
 
     // all of these need to be optionals so that we can create an empty
     // shell of the actor and then fill in the values later so we don't wait
@@ -45,362 +48,666 @@ struct ConnActor {
     // route_packet failed
     conn: Option<Connection>,
     conn_endpoint_id: EndpointId,
-    send_stream: Option<SendStream>,
-    recv_stream: Option<RecvStream>,
-    endpoint: Endpoint,
 
-    last_reconnect: tokio::time::Instant,
-    reconnect_backoff: Duration,
-    reconnect_count: AtomicUsize,
+    external_sender: tokio::sync::mpsc::Sender<DirectMessage>,
 
-    external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
+    write_task: Option<tokio::task::JoinHandle<()>>,
+    write_tx: Option<tokio::sync::mpsc::Sender<DirectMessage>>,
 
-    receiver_queue: VecDeque<DirectMessage>,
-    receiver_notify: tokio::sync::Notify,
+    read_task: Option<tokio::task::JoinHandle<()>>,
+
+    queue_len: Arc<std::sync::atomic::AtomicUsize>,
+    dropped_packets: Arc<AtomicUsize>,
 
     sender_queue: VecDeque<DirectMessage>,
-    sender_notify: tokio::sync::Notify,
+    rx_count: Arc<AtomicUsize>,
+    tx_count: Arc<AtomicUsize>,
+    write_timeouts: Arc<AtomicUsize>,
+    consecutive_write_errors: Arc<AtomicUsize>,
 }
 
 impl Conn {
-    pub async fn new(
-        endpoint: Endpoint,
+    pub async fn accept_connection(
         conn: iroh::endpoint::Connection,
-        send_stream: SendStream,
-        recv_stream: RecvStream,
-        external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
+        external_sender: tokio::sync::mpsc::Sender<DirectMessage>,
     ) -> Result<Self> {
-        let (api, rx) = Handle::channel();
-        let mut actor = ConnActor::new(
-            rx,
-            api.clone(),
-            external_sender,
-            endpoint,
-            conn.remote_id(),
-            Some(conn),
-            Some(send_stream),
-            Some(recv_stream),
-        )
-        .await;
-        tokio::spawn(async move { actor.run().await });
-        Ok(Self { api })
-    }
-
-    pub async fn connect(
-        endpoint: Endpoint,
-        endpoint_id: EndpointId,
-        external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
-    ) -> Self {
-        let (api, rx) = Handle::channel();
-        let mut actor = ConnActor::new(
-            rx,
-            api.clone(),
-            external_sender,
-            endpoint.clone(),
-            endpoint_id,
-            None,
-            None,
-            None,
-        )
-        .await;
-
-        tokio::spawn(async move {
-            actor.set_state(ConnState::Connecting);
-            actor.run().await
-        });
+        let (api, _) = Handle::spawn_with(
+            ConnActor::new(external_sender, conn.remote_id()),
+            |mut actor, rx| async move { actor.run(rx).await },
+        );
         let s = Self { api };
+        let self_handle = s.api.clone();
+        s.api
+            .call(act_ok!(actor => async move {
+                actor.state.set(ConnState::Connecting).ok();
+                actor.self_handle = Some(self_handle);
+            }))
+            .await?;
 
-        tokio::spawn({
-            let s = s.clone();
-            async move {
-                if let Ok(conn) = endpoint.connect(endpoint_id, crate::Direct::ALPN).await {
-                    let _ = s.incoming_connection(conn, false).await;
-                }
-            }
-        });
+        /*
+        if let Err(err) = handshake(conn.clone(), CONNECTING_TIMEOUT).await {
+            warn!("Handshake failed for {}: {}", conn.remote_id(), err);
+            s.drop().await;
+            anyhow::bail!("Handshake failed: {}", err);
+        }
+        */
 
-        s
+        if let Err(err) = s.establish_connection(conn.clone()).await {
+            warn!(
+                "Failed to establish connection with {}: {}",
+                conn.remote_id(),
+                err
+            );
+            s.drop().await;
+            anyhow::bail!("Failed to establish connection: {}", err);
+        }
+
+        Ok(s)
     }
 
-    pub async fn get_state(&self) -> ConnState {
+    pub async fn open_connection(
+        endpoint: Endpoint,
+        remote_endpoint_id: EndpointId,
+        external_sender: tokio::sync::mpsc::Sender<DirectMessage>,
+    ) -> Result<Self> {
+        let (api, _) = Handle::spawn_with(
+            ConnActor::new(external_sender, remote_endpoint_id),
+            |mut actor, rx| async move { actor.run(rx).await },
+        );
+        let s = Self { api };
+        let self_handle = s.api.clone();
+        s.api
+            .call(act_ok!(actor => async move {
+                actor.state.set(ConnState::Connecting).ok();
+                actor.self_handle = Some(self_handle);
+            }))
+            .await?;
+
+        let conn = match tokio::time::timeout(
+            CONNECTING_TIMEOUT,
+            endpoint.connect(remote_endpoint_id, crate::Direct::ALPN),
+        )
+        .await
+        {
+            Ok(Ok(conn)) => conn,
+            Ok(Err(e)) => {
+                warn!(
+                    "Initial connection to {} failed: {:?}",
+                    remote_endpoint_id, e
+                );
+                s.drop().await;
+                anyhow::bail!("Failed to establish connection: {}: {:?}", e, e);
+            }
+            Err(_) => {
+                warn!(
+                    "Initial connection to {} timed out after {}s",
+                    remote_endpoint_id,
+                    CONNECTING_TIMEOUT.as_secs()
+                );
+                s.drop().await;
+                anyhow::bail!("Connection timed out");
+            }
+        };
+
+        /*
+        if let Err(err) = handshake(conn.clone(), CONNECTING_TIMEOUT).await {
+            warn!("Handshake failed for {}: {:?}", conn.remote_id(), err);
+            s.drop().await;
+            anyhow::bail!("Handshake failed: {}", err);
+        }
+        */
+
+        if let Err(err) = s.establish_connection(conn).await {
+            warn!(
+                "Failed to establish connection with {}: {}",
+                remote_endpoint_id, err
+            );
+            s.drop().await;
+            anyhow::bail!("Failed to establish connection: {}: {:?}", err, err);
+        }
+
+        Ok(s)
+    }
+
+    pub async fn get_state(&self) -> Watchable<ConnState> {
         if let Ok(state) = self
             .api
             .call(act_ok!(actor => async move {
-                actor.state
+                actor.state.clone()
             }))
             .await
         {
             state
         } else {
-            ConnState::Closed
+            Watchable::new(ConnState::ClosedAndStopped)
         }
     }
 
-    pub async fn close(&self) -> Result<()> {
-        self.api.call(act_ok!(actor => actor.close())).await
-    }
+    /*
+    pub async fn get_conn(&self) -> Option<Connection> {
+        self.api
+            .call(act_ok!(actor => async {
+                actor.conn.clone()
+            }))
+            .await
+            .unwrap_or_default()
+    } */
 
     pub async fn write(&self, pkg: DirectMessage) -> Result<()> {
         self.api.call(act_ok!(actor => actor.write(pkg))).await
     }
 
-    pub async fn incoming_connection(&self, conn: Connection, accept_not_open: bool) -> Result<()> {
+    pub async fn establish_connection(&self, conn: Connection) -> Result<()> {
         self.api
-            .call(act!(actor => actor.incoming_connection(conn, accept_not_open)))
+            .call(act!(actor => actor.establish_connection(conn)))
             .await
+    }
+
+    pub async fn drop(&self) {
+        if self.api.state() == ActorState::Stopped {
+            return;
+        }
+        self.api
+            .call(act_ok!(actor => async {
+                actor.close().await;
+                actor.state.set(ConnState::ClosedAndStopped).ok();
+            }))
+            .await
+            .ok();
     }
 }
 
-impl Actor<anyhow::Error> for ConnActor {
-    async fn run(&mut self) -> Result<()> {
-        let mut reconnect_ticker = tokio::time::interval(Duration::from_millis(500));
-        let mut notification_ticker = tokio::time::interval(Duration::from_millis(500));
+#[allow(dead_code)]
+async fn handshake(conn: Connection, handshake_timeout: Duration) -> Result<()> {
+    let handshake_task = async {
+        let (mut send, mut recv) = if conn.side() == iroh::endpoint::Side::Client {
+            conn.open_bi().await?
+        } else {
+            conn.accept_bi().await?
+        };
+        let mut buf = [0u8; 1];
+        info!(
+            "Performing connection handshake for #1: {}",
+            conn.remote_id()
+        );
+        send.write_all(&buf).await?;
+        send.finish()?;
 
-        reconnect_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        notification_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        info!(
+            "Performing connection handshake for #2: {}",
+            conn.remote_id()
+        );
+        recv.read_exact(&mut buf).await?;
+        recv.read_to_end(usize::MAX).await?;
+        info!(
+            "Performing connection handshake for #3: {}",
+            conn.remote_id()
+        );
+        Ok(())
+    };
+
+    tokio::time::timeout(handshake_timeout, handshake_task).await?
+}
+
+impl ConnActor {
+    async fn run(&mut self, rx: Receiver<Action<ConnActor>>) -> Result<()> {
+        //let mut reconnect_ticker = tokio::time::interval(Duration::from_millis(500));
+        //reconnect_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let mut keepalive_ticker = tokio::time::interval(KEEPALIVE_INTERVAL);
+        keepalive_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let mut stats_ticker = tokio::time::interval(STATS_LOG_INTERVAL);
+        stats_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        debug!("ConnActor started for peer: {}", self.conn_endpoint_id);
 
         loop {
+            if self.state.get() == ConnState::ClosedAndStopped {
+                debug!(
+                    "ConnActor for {} is in ClosedAndStopped state, exiting run loop",
+                    self.conn_endpoint_id
+                );
+                break;
+            }
             tokio::select! {
-                Ok(action) = self.rx.recv_async() => {
+                Ok(action) = rx.recv_async() => {
                     action(self).await;
                 }
-                _ = reconnect_ticker.tick(), if self.state != ConnState::Closed => {
+                /*_ = reconnect_ticker.tick(), if self.state != ConnState::Closed => {
 
-                    let need_reconnect = self.send_stream.is_none()
-                        || self.conn.as_ref().and_then(|c| c.close_reason()).is_some();
+                    let need_reconnect = !matches!(self.state, ConnState::Open | ConnState::Connecting) &&
+                        (self.write_task.as_ref().map(|t| t.is_finished()).unwrap_or(false)
+                        || self.read_task.as_ref().map(|t| t.is_finished()).unwrap_or(false)
+                        || self.conn.as_ref().and_then(|c| c.close_reason()).is_some()
+                        || self.closed_task.as_ref().map(|t| t.is_finished()).unwrap_or(false)
+                    );
 
                     if need_reconnect && self.last_reconnect.elapsed() > self.reconnect_backoff {
-                        if self.reconnect_count.load(std::sync::atomic::Ordering::SeqCst) < MAX_RECONNECTS {
-                            warn!("Send stream stopped");
+                        if self.reconnect_count.load(Ordering::SeqCst) < MAX_RECONNECTS {
+                            warn!("Write task finished or connection issues detected. Attempting reconnect.");
                             let _ = self.try_reconnect().await;
                         } else {
                             warn!("Max reconnects reached, closing connection to {}", self.conn_endpoint_id);
                             break;
                         }
                     }
-                }
-                _ = notification_ticker.tick(), if self.state != ConnState::Closed
-                        && (!self.sender_queue.is_empty()
-                            || self.receiver_queue.is_empty()) => {
-
-                    if !self.sender_queue.is_empty() {
-                        self.sender_notify.notify_one();
-                    }
-                    if !self.receiver_queue.is_empty() {
-                        self.receiver_notify.notify_one();
-                    }
-                }
-                stream_recv = async {
-                    let recv = self.recv_stream.as_mut().expect("checked in if via self.recv_stream.is_some()");
-                    recv.read_u32_le().await
-                }, if self.state != ConnState::Closed && self.recv_stream.is_some() => {
-                    if let Ok(frame_size) = stream_recv {
-                        let _res = self.remote_read_next(frame_size).await;
-                    }
-                }
-                _ = self.sender_notify.notified(), if self.conn.is_some() && self.state == ConnState::Open => {
-                    while !self.sender_queue.is_empty() {
-                        if self.remote_write_next().await.is_err() {
-                            warn!("Failed to write to remote, will attempt to reconnect");
-                            self.set_state(ConnState::Disconnected);
-                            break;
+                }*/
+                _ = keepalive_ticker.tick(), if self.state.get() == ConnState::Open => {
+                    if let Some(tx) = &self.write_tx {
+                        match tx.try_send(DirectMessage::IDontLikeWarnings) {
+                            Ok(_) => {
+                                let new_len = self.queue_len.fetch_add(1, Ordering::Relaxed) + 1;
+                                if new_len > QUEUE_WARN_LEN {
+                                    warn!("Stream queue length high (keepalive): {}", new_len);
+                                }
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                self.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                self.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
-                _ = self.receiver_notify.notified(), if self.conn.is_some() && self.state != ConnState::Closed => {
-
-                    while let Some(msg) = self.receiver_queue.pop_back() {
-                        if self.external_sender.send(msg.clone()).is_err() {
-                            warn!("No active receivers for incoming messages");
-                            self.set_state(ConnState::Disconnected);
-                            break;
-                        }
+                _ = stats_ticker.tick() => {
+                    let q_len = self.queue_len.load(Ordering::Relaxed);
+                    if q_len > 100 {
+                        warn!("[PROBE-QUEUE] High Queue Len: {}", q_len);
                     }
+                    debug!(
+                        "Conn stats: endpoint_id={} state={:?} rx_count={} tx_count={} queue_len={} write_timeouts={} write_errors={} dropped_packets={}",
+                        self.conn_endpoint_id,
+                        self.state.get(),
+                        self.rx_count.load(Ordering::Relaxed),
+                        self.tx_count.load(Ordering::Relaxed),
+                        self.queue_len.load(Ordering::Relaxed),
+                        self.write_timeouts.load(Ordering::Relaxed),
+                        self.consecutive_write_errors.load(Ordering::Relaxed),
+                        self.dropped_packets.load(Ordering::Relaxed)
+                    );
                 }
                 _ = tokio::signal::ctrl_c() => {
+                    info!("Received Ctrl-C, stopping actor");
                     break
                 }
             }
         }
-        self.close().await;
         Ok(())
     }
 }
 
 impl ConnActor {
     #[allow(clippy::too_many_arguments)]
-    pub async fn new(
-        rx: Receiver<Action<ConnActor>>,
-        self_handle: Handle<ConnActor, anyhow::Error>,
-        external_sender: tokio::sync::broadcast::Sender<DirectMessage>,
-        endpoint: Endpoint,
+    pub fn new(
+        external_sender: tokio::sync::mpsc::Sender<DirectMessage>,
         conn_endpoint_id: EndpointId,
-        conn: Option<iroh::endpoint::Connection>,
-        send_stream: Option<SendStream>,
-        recv_stream: Option<RecvStream>,
     ) -> Self {
         Self {
-            rx,
-            state: if conn.is_some() && send_stream.is_some() && recv_stream.is_some() {
-                ConnState::Open
-            } else {
-                ConnState::Disconnected
-            },
+            state: Watchable::new(ConnState::Connecting),
             external_sender,
-            receiver_queue: VecDeque::with_capacity(QUEUE_SIZE),
+            read_task: None,
+            write_task: None,
+            write_tx: None,
+            queue_len: Arc::new(AtomicUsize::new(0)),
             sender_queue: VecDeque::with_capacity(QUEUE_SIZE),
-            conn,
-            send_stream,
-            recv_stream,
-            endpoint,
-            receiver_notify: tokio::sync::Notify::new(),
-            sender_notify: tokio::sync::Notify::new(),
-            last_reconnect: tokio::time::Instant::now(),
-            reconnect_backoff: Duration::from_millis(100),
+            conn: None,
             conn_endpoint_id,
-            self_handle,
-            reconnect_count: AtomicUsize::new(0),
+            self_handle: None,
+            rx_count: Arc::new(AtomicUsize::new(0)),
+            tx_count: Arc::new(AtomicUsize::new(0)),
+            write_timeouts: Arc::new(AtomicUsize::new(0)),
+            consecutive_write_errors: Arc::new(AtomicUsize::new(0)),
+            dropped_packets: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    pub fn set_state(&mut self, state: ConnState) {
-        self.state = state;
-    }
-
     pub async fn close(&mut self) {
-        self.state = ConnState::Closed;
+        if matches!(
+            self.state.get(),
+            ConnState::Disconnected | ConnState::ClosedAndStopped | ConnState::Closed
+        ) {
+            return;
+        }
+
+        info!("Closing connection actor");
         if let Some(conn) = self.conn.as_mut() {
             conn.close(VarInt::from_u32(400), b"Connection closed by user");
         }
         self.conn = None;
-        self.send_stream = None;
-        self.recv_stream = None;
+        self.state.set(ConnState::ClosedAndStopped).ok();
+
+        if let Some(task) = self.read_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.write_task.take() {
+            task.abort();
+        }
     }
 
     pub async fn write(&mut self, pkg: DirectMessage) {
-        self.sender_queue.push_front(pkg);
-        self.sender_notify.notify_one();
+        if let Some(tx) = &self.write_tx {
+            trace!("Sending packet to write task");
+            match tx.try_send(pkg) {
+                Ok(_) => {
+                    let new_len = self.queue_len.fetch_add(1, Ordering::Relaxed) + 1;
+                    if new_len > QUEUE_WARN_LEN {
+                        warn!("Stream queue length high: {}", new_len);
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    self.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                    if self
+                        .dropped_packets
+                        .load(Ordering::Relaxed)
+                        .is_multiple_of(1000)
+                    {
+                        warn!(
+                            "Write queue full, dropping packet (dropped={})",
+                            self.dropped_packets.load(Ordering::Relaxed)
+                        );
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(val)) => {
+                    warn!("Write task channel closed, buffering packet.");
+                    self.sender_queue.push_front(val);
+                    while self.sender_queue.len() > MAX_SENDER_QUEUE {
+                        self.sender_queue.pop_back();
+                    }
+                    if self.state.get() == ConnState::Open {
+                        self.state.set(ConnState::Disconnected).ok();
+                    }
+                }
+            }
+        } else {
+            trace!(
+                "Queueing packet for write. Queue size: {}",
+                self.sender_queue.len()
+            );
+            self.sender_queue.push_front(pkg);
+            while self.sender_queue.len() > MAX_SENDER_QUEUE {
+                self.sender_queue.pop_back();
+            }
+        }
     }
 
-    pub async fn incoming_connection(
-        &mut self,
-        conn: Connection,
-        accept_not_open: bool,
-    ) -> Result<()> {
-        let (send_stream, recv_stream) = if accept_not_open {
-            conn.accept_bi().await?
+    pub async fn establish_connection(&mut self, conn: Connection) -> Result<()> {
+        info!("Incoming connection from: {}", conn.remote_id());
+        let self_handle = if let Some(api) = self.self_handle.clone() {
+            api
         } else {
-            conn.open_bi().await?
+            warn!("No API handle provided to read loop, cannot close connection on failure");
+            return Err(anyhow::anyhow!("internal error: no API handle"));
         };
 
         if conn.close_reason().is_some() {
-            self.state = ConnState::Closed;
+            warn!("Incoming connection already closed");
+            self.state.set(ConnState::Disconnected).ok();
             return Err(anyhow::anyhow!("connection closed"));
         }
 
-        self.conn = Some(conn);
-        self.send_stream = Some(send_stream);
-        self.recv_stream = Some(recv_stream);
-        self.state = ConnState::Open;
-        self.sender_notify.notify_one();
-        self.receiver_notify.notify_one();
-        self.reconnect_backoff = RECONNECT_BACKOFF_BASE;
-
-        // SHOULD NOT CHANGE but just for sanity
-        //self.conn_node_id = self.conn.clone().expect("new_conn").remote_node_id()?;
-
-        Ok(())
-    }
-
-    async fn try_reconnect(&mut self) -> Result<()> {
-        if self.state == ConnState::Closed {
-            return Err(anyhow::anyhow!("actor closed for good"));
-        }
-
-        self.state = ConnState::Connecting;
-        self.reconnect_backoff *= 3;
-        self.last_reconnect = tokio::time::Instant::now();
-
-        self.send_stream = None;
-        self.recv_stream = None;
-        self.conn = None;
-
-        tokio::spawn({
-            let api = self.self_handle.clone();
-            let endpoint = self.endpoint.clone();
-            let conn_node_id = self.conn_endpoint_id;
-            async move {
-                if let Ok(conn) = endpoint.connect(conn_node_id, crate::Direct::ALPN).await {
-                    let _ = api
-                        .call(act!(actor => actor.incoming_connection(conn, false)))
-                        .await;
-                    let _ = api.call(act_ok!(actor => async move { actor.reconnect_count.store(0, std::sync::atomic::Ordering::SeqCst) })).await;
-                } else {
-                    let _ = api.call(act_ok!(actor => async move { actor.reconnect_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) })).await;
+        /*
+        let mut ack_iter = 0u8;
+        match conn.side() {
+            iroh::endpoint::Side::Client => {
+                iroh_auth::send_and_ack(
+                    &conn,
+                    &mut ack_iter,
+                    Bytes::copy_from_slice(&[42]),
+                    Duration::from_secs(5),
+                )
+                .await?;
+                info!(
+                    "Performing connection handshake for #2: {}",
+                    conn.remote_id()
+                );
+                let recv =
+                    iroh_auth::read_and_ack(&conn, &mut ack_iter, Duration::from_secs(10)).await?;
+                info!(
+                    "Performing connection handshake for #3: {}",
+                    conn.remote_id()
+                );
+                if recv.len() != 1 || recv[0] != 42 {
+                    warn!("Handshake failed: invalid ack from client");
+                    return Err(anyhow::anyhow!("handshake failed"));
                 }
             }
-        });
+            iroh::endpoint::Side::Server => {
+                let recv =
+                    iroh_auth::read_and_ack(&conn, &mut ack_iter, Duration::from_secs(10)).await?;
+                info!(
+                    "Performing connection handshake for #2: {}",
+                    conn.remote_id()
+                );
+                if recv.len() != 1 || recv[0] != 42 {
+                    warn!("Handshake failed: invalid ack from server");
+                    return Err(anyhow::anyhow!("handshake failed"));
+                }
+                iroh_auth::send_and_ack(
+                    &conn,
+                    &mut ack_iter,
+                    Bytes::copy_from_slice(&[42]),
+                    Duration::from_secs(5),
+                )
+                .await?;
+                info!(
+                    "Performing connection handshake for #3: {}",
+                    conn.remote_id()
+                );
+            }
+        } */
+
+        info!("Spawning read task for incoming connection");
+        let rx_count = self.rx_count.clone();
+        self.read_task = Some(tokio::spawn(retry_read_loop(
+            conn.clone(),
+            self.external_sender.clone(),
+            self_handle.clone(),
+            rx_count,
+        )));
+
+        info!("Spawning write task for incoming connection");
+        let (tx, rx) = tokio::sync::mpsc::channel(WRITE_CHANNEL_CAP);
+        self.queue_len.store(0, Ordering::Relaxed);
+        let write_timeouts = self.write_timeouts.clone();
+        let tx_count = self.tx_count.clone();
+        self.write_task = Some(tokio::spawn(write_loop_bounded(
+            conn.clone(),
+            rx,
+            self_handle.clone(),
+            self.queue_len.clone(),
+            "main",
+            tx_count,
+            write_timeouts,
+        )));
+        self.write_tx = Some(tx.clone());
+
+        self.conn = Some(conn);
+        self.consecutive_write_errors.store(0, Ordering::Relaxed);
+        self.rx_count.store(0, Ordering::Relaxed);
+        self.tx_count.store(0, Ordering::Relaxed);
+
+        while let Some(msg) = self.sender_queue.pop_back() {
+            match tx.try_send(msg) {
+                Ok(_) => {
+                    let new_len = self.queue_len.fetch_add(1, Ordering::Relaxed) + 1;
+                    if new_len > QUEUE_WARN_LEN {
+                        warn!("Stream queue length high (flush): {}", new_len);
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    self.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    self.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        self.state.set(ConnState::Open).ok();
+
         Ok(())
     }
+}
 
-    async fn remote_write_next(&mut self) -> Result<()> {
-        let start = SystemTime::now();
-        let mut wrote = 0;
-        if let Some(send_stream) = &mut self.send_stream {
-            while let Some(msg) = self.sender_queue.back() {
-                let bytes = postcard::to_stdvec(msg)?;
-                send_stream.write_u32_le(bytes.len() as u32).await?;
-                send_stream.write_all(bytes.as_slice()).await?;
-                let _ = self.sender_queue.pop_back();
-                wrote += 1;
-                if wrote >= 256 {
+async fn write_loop_bounded(
+    conn: Connection,
+    mut rx: tokio::sync::mpsc::Receiver<DirectMessage>,
+    api: Handle<ConnActor, anyhow::Error>,
+    queue_len: Arc<std::sync::atomic::AtomicUsize>,
+    label: &'static str,
+    tx_count: Arc<AtomicUsize>,
+    write_timeout: Arc<AtomicUsize>,
+) {
+    info!("Write task started ({})", label);
+    while let Some(msg) = rx.recv().await {
+        let _ = queue_len.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_sub(1))
+        });
+        let bytes = match postcard::to_stdvec(&msg) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("Failed to serialize message: {}", e);
+                continue;
+            }
+        };
+        let mut buf = vec![DATAGRAM_PREFIX];
+        buf.extend_from_slice(&bytes);
+
+        let mut retries = 0;
+        while retries < 1 {
+            match time::timeout(
+                KEEPALIVE_INTERVAL * 5,
+                conn.send_datagram_wait(Bytes::from(buf.clone())),
+            )
+            .await
+            {
+                Ok(Ok(())) => break,
+                Ok(Err(err)) => {
+                    warn!("Write error (frame): {}, {:?}, retrying...", err, err);
+                    retries += 1;
+                    time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(_) => {
+                    warn!("Write error timeout (frame)");
+                    write_timeout.fetch_add(1, Ordering::SeqCst);
+                    time::sleep(Duration::from_millis(100)).await;
                     break;
                 }
             }
-        } else {
-            return Err(anyhow::anyhow!("no send stream"));
         }
 
-        if !self.sender_queue.is_empty() {
-            self.sender_notify.notify_one();
+        if retries == 1 {
+            warn!(
+                "Write failed after 3 retries, dropping connection: peer_id: {}",
+                if let Ok(peer_id) = api
+                    .call(act_ok!(actor => async move { actor.conn_endpoint_id }))
+                    .await
+                {
+                    peer_id.to_string()
+                } else {
+                    "unknown".to_string()
+                }
+            );
+            info!("Write task stopped ({})", label);
+            let _ = api.call(act_ok!(actor => actor.close())).await;
+            break;
         }
 
-        let end = SystemTime::now();
-        let duration = end.duration_since(start).unwrap();
-        debug!("write_remote: {wrote}; elapsed: {}", duration.as_millis());
-        Ok(())
+        tx_count.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+async fn retry_read_loop(
+    conn: Connection,
+    sender: tokio::sync::mpsc::Sender<DirectMessage>,
+    api: Handle<ConnActor, anyhow::Error>,
+    rx_count: Arc<AtomicUsize>,
+) {
+    info!("Read task started");
+    let mut retries = 0;
+    while retries < 1 {
+        match tokio::time::timeout(KEEPALIVE_INTERVAL * 5, read_next_msg(&conn)).await {
+            Ok(Ok(msg)) => {
+                retries = 0;
+                rx_count.fetch_add(1, Ordering::SeqCst);
+                trace!("Read message from stream, forwarding to network actor");
+                let start = std::time::Instant::now();
+                if let Err(e) = sender.send(msg).await {
+                    warn!("Failed to forward message to network actor: {}", e);
+                    break;
+                }
+                if start.elapsed().as_millis() > BACKPRESSURE_WARN_MS {
+                    warn!(
+                        "Direct->Network backpressure: send blocked {} ms",
+                        start.elapsed().as_millis()
+                    );
+                }
+            }
+            Ok(Err(ReadError::Multiplex(_))) => {
+                continue;
+            }
+            Ok(Err(e)) => {
+                warn!("Stream read error: {:?}", e);
+                retries += 1;
+            }
+            Err(e) => {
+                warn!("Stream read error: timeout after {}", e);
+                retries += 1;
+            }
+        }
     }
 
-    async fn remote_read_next(&mut self, frame_len: u32) -> Result<DirectMessage> {
-        if let Some(recv_stream) = &mut self.recv_stream {
-            let mut buf = vec![0; frame_len as usize];
-
-            let start = SystemTime::now();
-            recv_stream.read_exact(&mut buf).await?;
-
-            if let Ok(pkg) = postcard::from_bytes(&buf) {
-                match pkg {
-                    DirectMessage::IpPacket(ip_pkg) => {
-                        if let Ok(ip_pkg) = ip_pkg.to_ipv4_packet() {
-                            let msg = DirectMessage::IpPacket(ip_pkg.into());
-                            self.receiver_queue.push_front(msg.clone());
-                            self.receiver_notify.notify_one();
-                            let end = SystemTime::now();
-                            let duration = end.duration_since(start).unwrap();
-                            debug!("read_remote: elapsed: {}", duration.as_millis());
-                            Ok(msg)
-                        } else {
-                            Err(anyhow::anyhow!("failed to convert to IPv4 packet"))
-                        }
-                    }
-                    #[allow(unreachable_patterns)]
-                    _ => Err(anyhow::anyhow!("unsupported message type")),
-                }
+    info!("Read task stopped");
+    if retries >= 1 {
+        warn!(
+            "Read failed after 3 retries, dropping connection: peer_id: {}",
+            if let Ok(peer_id) = api
+                .call(act_ok!(actor => async move { actor.conn_endpoint_id }))
+                .await
+            {
+                peer_id.to_string()
             } else {
-                Err(anyhow::anyhow!("failed to deserialize message"))
+                "unknown".to_string()
             }
-        } else {
-            Err(anyhow::anyhow!("no recv stream"))
+        );
+        let _ = api.call(act_ok!(actor => actor.close())).await;
+    }
+}
+
+#[derive(Debug)]
+enum ReadError {
+    Datagram(String),
+    Multiplex(String),
+    Deserialize(String),
+}
+
+impl Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadError::Datagram(e) => write!(f, "Read error: {}", e),
+            ReadError::Multiplex(e) => write!(f, "Read error: {}", e),
+            ReadError::Deserialize(e) => write!(f, "Read error: {}", e),
         }
+    }
+}
+
+impl std::error::Error for ReadError {}
+
+async fn read_next_msg(conn: &Connection) -> Result<DirectMessage, ReadError> {
+    let buf = conn
+        .read_datagram()
+        .await
+        .map_err(|e| ReadError::Datagram(format!("failed to read datagram: {}", e)))?;
+    if buf.len() > 1 && buf[0] == DATAGRAM_PREFIX {
+        let msg: DirectMessage = postcard::from_bytes(&buf[1..])
+            .map_err(|e| ReadError::Deserialize(format!("failed to deserialize message: {}", e)))?;
+        Ok(msg)
+    } else {
+        Err(ReadError::Multiplex(format!(
+            "not meant for us: prefix={:X}",
+            buf[0]
+        )))
     }
 }
