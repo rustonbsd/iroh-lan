@@ -7,47 +7,70 @@ repository = "https://github.com/rustonbsd/iroh-lan"
 readme = "README.md"
 keywords = ["networking"]
 categories = ["network-programming"]
-version = "0.1.2"
+version = "1.0.0-pre.1"
 edition = "2024"
 
 
 [dependencies]
 anyhow = "1"
-distributed-topic-tracker = "0.2.5"
-ed25519-dalek = "3.0.0-pre.1"
-iroh = "0.95.1"
-iroh-gossip = "0.95.0"
-iroh-docs = "0.95.0"
-iroh-blobs = "0.97.0"
+iroh-topic-tracker = "0.2.0"
+ed25519-dalek = "3.0.0-pre.7"
+iroh = { version="1.0.2", features=["qlog", "tls-ring"] }
+netwatch = "0.19.1"
+iroh-gossip = "0.101.0"
 runas = "1"
 tokio = "1"
-nix = { version = "0.30", features = ["process"] }
+#nix = { version = "0.31.3", features = ["process"] }
 self-runas = "0.1"
 rand = "0.9"
 pnet_packet = "0.35"
-tun-rs = { version = "2.7.7", features = ["async"] }
+tun-rs = { version = "2.8", features = ["async"] }
 serde = "1"
 futures = "0.3"
+futures-lite = "2"
 postcard = { version = "1", features = ["use-std"] }
 sha2 = "0.10"
 z32 = "1"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1"
+chrono = { version = "0.4" }
+n0-watcher = "1.0.0"
+if-addrs = "0.15"
+ipnet = "2"
 
-actor-helper = "0.2"
-
+iroh-auth = "0.2.0"
+actor-helper = { version="0.3.0", features=["anyhow", "tokio"]}
+clap = { version = "4.6", features = ["derive"] }
+ratatui = "0.30.0"
+crossterm = "0.29.0"
+noq-proto =  { git = "https://github.com/n0-computer/noq", rev = "0a445ddf828d3be8c973877d3053043998146f36" }#{ version = "1.0.1" }
+url = "2"
+thiserror = "1"
+blake3 = "1"
 
 [lib]
 path = "src/lib.rs"
 crate-type = ["lib"]
 bench = false
 
+[[bin]]
+name = "iroh-lan"
+path = "src/bin/main.rs"
+
 [[example]]
 name = "participant"
 path = "examples/participant.rs"
 crate-type = ["bin"]
 
-[[example]]
-name = "creator"
-path = "examples/creator.rs"
-crate-type = ["bin"]
+
+[patch.crates-io]
+noq-proto = { git = "https://github.com/n0-computer/noq", rev = "0a445ddf828d3be8c973877d3053043998146f36" }
+noq = { git = "https://github.com/n0-computer/noq", rev = "0a445ddf828d3be8c973877d3053043998146f36" }
+noq-udp = { git = "https://github.com/n0-computer/noq", rev = "0a445ddf828d3be8c973877d3053043998146f36" }
+
+#iroh = { path = "../iroh/iroh" }
+#iroh-base = { path = "../iroh/iroh-base" }
+#iroh-dns = { path = "../iroh/iroh-dns" }
+#iroh-relay = { path = "../iroh/iroh-relay" }
+netwatch = { path = "../net-tools/netwatch" }

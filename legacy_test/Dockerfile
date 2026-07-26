@@ -30,14 +30,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry,sharin
     --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git,sharing=locked \
     --mount=type=cache,target=/app/target,id=cargo-target,sharing=locked \
     cargo build --example participant \
-    && cargo build --example creator \
     && mkdir -p /dist \
-    && cp /app/target/debug/examples/participant /dist/participant \
-    && cp /app/target/debug/examples/creator /dist/creator
+    && cp /app/target/debug/examples/participant /dist/participant
 
 FROM debian:bullseye-slim AS runtime-base
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl1.1 \
+    ca-certificates libssl1.1 iperf3 iproute2 iputils-ping \
   && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV RUST_BACKTRACE=1
@@ -45,7 +43,4 @@ ENV RUST_BACKTRACE=1
 FROM runtime-base AS participant-runtime
 COPY --from=builder /dist/participant /usr/local/bin/participant
 CMD ["participant"]
-
-FROM runtime-base AS creator-runtime
-COPY --from=builder /dist/creator /usr/local/bin/creator
 CMD ["creator"]

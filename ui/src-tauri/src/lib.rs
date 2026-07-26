@@ -1,21 +1,14 @@
-use iroh_lan::network::Network;
+use iroh_lan::Network;
 use once_cell::sync::Lazy;
 use serde::Serialize;
+use tauri_plugin_log::log;
 use tokio::sync::Mutex;
-use tracing::{self, info};
+use tracing::info;
 
 // Re-export lib so main.rs can call run()
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
-static NETWORK: Lazy<Mutex<Option<Network>>> = Lazy::new(|| {
-    #[cfg(debug_assertions)]
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_thread_ids(true)
-        .init();
-
-    Mutex::new(None)
-});
+static NETWORK: Lazy<Mutex<Option<Network>>> = Lazy::new(|| Mutex::new(None));
 
 #[derive(Debug, Serialize)]
 pub enum Status {
@@ -53,6 +46,10 @@ impl MyInfo {
                     Some(format!("acquiring {}...", ip_candidate.ip))
                 }
                 iroh_lan::RouterIp::AssignedIp(ipv4_addr) => Some(format!("{ipv4_addr}")),
+                iroh_lan::RouterIp::VerifyingIp(ipv4_addr, instant) => Some(format!(
+                    "verifying {ipv4_addr} ({}s)",
+                    instant.elapsed().as_secs()
+                )),
             },
         })
     }
@@ -96,12 +93,12 @@ async fn connection_state() -> Result<ConnectionState, String> {
     let guard = NETWORK.lock().await;
     if let Some(network) = guard.as_ref() {
         // peer count
-        let peers = network
-            .get_peers()
+        let peers = network.get_peers().await.map_err(|e| e.to_string())?;
+
+        let router = network
+            .get_router_handle()
             .await
             .map_err(|e| e.to_string())?;
-
-        let router = network.get_router_handle().await.map_err(|e| e.to_string())?;
         let ip_state = router.get_ip_state().await.map_err(|e| e.to_string())?;
         let (ip, raw_ip_state) = match ip_state {
             iroh_lan::RouterIp::NoIp => (None, "NoIp".to_string()),
@@ -109,7 +106,16 @@ async fn connection_state() -> Result<ConnectionState, String> {
                 Some(format!("acquiring {}...", candidate.ip)),
                 "AquiringIp".to_string(),
             ),
-            iroh_lan::RouterIp::AssignedIp(addr) => (Some(addr.to_string()), "AssignedIp".to_string()),
+            iroh_lan::RouterIp::AssignedIp(addr) => {
+                (Some(addr.to_string()), "AssignedIp".to_string())
+            }
+            iroh_lan::RouterIp::VerifyingIp(addr, instant) => (
+                Some(format!(
+                    "verifying {addr} ({}s)",
+                    instant.elapsed().as_secs()
+                )),
+                "VerifyingIp".to_string(),
+            ),
         };
 
         Ok(ConnectionState {
@@ -138,11 +144,18 @@ async fn my_info() -> Result<MyInfo, String> {
 async fn list_peers() -> Result<Vec<PeerInfo>, String> {
     let guard = NETWORK.lock().await;
     if let Some(network) = guard.as_ref() {
-        let direct_handle = network.get_direct_handle().await.map_err(|e| e.to_string())?;
+        let direct_handle = network
+            .get_direct_handle()
+            .await
+            .map_err(|e| e.to_string())?;
         let peers = network.get_peers().await.map_err(|e| e.to_string())?;
         let mut peer_infos = vec![];
         for peer in peers {
-            let status = direct_handle.get_conn_state(peer.0).await.map_err(|e| e.to_string()).unwrap_or(iroh_lan::ConnState::Idle);
+            let status = direct_handle
+                .get_peer_state(peer.0)
+                .await
+                .map_err(|e| e.to_string())
+                .unwrap_or(iroh_lan::InnerConnState::Closed);
             peer_infos.push(PeerInfo {
                 node_id: peer.0.to_string(),
                 ip: match peer.1 {
@@ -150,11 +163,9 @@ async fn list_peers() -> Result<Vec<PeerInfo>, String> {
                     None => "unknown".to_string(),
                 },
                 status: match status {
-                    iroh_lan::ConnState::Connecting => Status::Disconnected,
-                    iroh_lan::ConnState::Idle => Status::Active,
-                    iroh_lan::ConnState::Open => Status::Active,
-                    iroh_lan::ConnState::Disconnected => Status::Disconnected,
-                    iroh_lan::ConnState::Closed => Status::Disconnected,
+                    iroh_lan::InnerConnState::Connecting => Status::Disconnected,
+                    iroh_lan::InnerConnState::Open => Status::Active,
+                    iroh_lan::InnerConnState::Closed => Status::Disconnected,
                 },
             });
         }
@@ -174,7 +185,7 @@ async fn close(window: tauri::Window) -> Result<(), String> {
         network.close().await.map_err(|e| e.to_string())?;
     }
     *guard = None; // drop
-    
+
     window.close().map_err(|e| e.to_string())?;
 
     Ok(())
@@ -184,13 +195,22 @@ async fn close(window: tauri::Window) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_log::Builder::default()
+                .filter(|metadata| {
+                    matches!(
+                        metadata.target(),
+                        "iroh_lan::connection" | "iroh_lan::direct_connect" | "iroh_lan::router"
+                    ) && metadata.level() <= log::Level::Debug
+                })
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             my_info,
             list_peers,
             connection_state,
             close,
             create_network,
-
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

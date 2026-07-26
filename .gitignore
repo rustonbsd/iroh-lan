@@ -25,3 +25,7 @@ target
 
 /target
 .DS_Store
+
+docker_test/results_*
+netns_tests/reliability_test/results
+netns_tests/reliability_test/archives
